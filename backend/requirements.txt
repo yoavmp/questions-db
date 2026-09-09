@@ -1,0 +1,38 @@
+# Hebrew Exam Questions Management System - Backend Dependencies
+# מערכת ניהול שאלות בחינה בעברית - תלויות Backend
+
+# Core Flask Framework
+Flask==2.3.3                    # מסגרת הווב הראשית
+Flask-SQLAlchemy==3.0.5         # ORM לבסיס נתונים
+Flask-CORS==4.0.0               # תמיכה ב-CORS לחיבור Frontend
+
+# Database
+SQLAlchemy==2.0.21              # מנוע בסיס נתונים
+# sqlite3 is built into Python, no need to install
+
+# File Processing
+pandas==2.1.1                   # עיבוד קבצי CSV
+openpyxl==3.1.2                 # עיבוד קבצי Excel
+python-docx==0.8.11             # יצירה ועריכה של קבצי DOCX
+lxml==4.9.3                     # עיבוד XML (נדרש ל-python-docx)
+
+# Utilities
+python-dateutil==2.8.2          # עיבוד תאריכים
+pytz==2023.3                    # אזורי זמן
+charset-normalizer==3.2.0       # טיפול בקידוד תווים
+
+# Development & Testing
+pytest==7.4.2                   # מסגרת בדיקות
+pytest-flask==1.2.0             # בדיקות Flask
+python-dotenv==1.0.0            # ניהול משתני סביבה
+
+# Production Server (optional)
+gunicorn==21.2.0                # שרת WSGI לייצור
+waitress==2.1.2                 # שרת WSGI חלופי לWindows
+
+# Security
+Werkzeug==2.3.7                 # כלי אבטחה (מגיע עם Flask)
+MarkupSafe==2.1.3               # הגנה מפני XSS
+
+# Hebrew Text Processing - unicodedata is built into Python
+
