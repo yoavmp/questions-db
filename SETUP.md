@@ -22,28 +22,46 @@ npm --version       # Should show npm version
 
 ### Step 2: Backend Setup - הגדרת Backend
 
+**Recommended (WP18): one root-based, reproducible install** that also wires in
+the pinned `exam_generator` submodule used for LLM question generation:
+
 ```bash
-# Navigate to backend directory
+# from the repository root (needs the submodule checked out:
+#   git submodule update --init --recursive )
+./scripts/dev_install.sh
+source .venv/bin/activate
+
+cd backend && python run.py         # http://localhost:4567
+```
+
+`scripts/dev_install.sh` installs `backend/requirements.txt`, then the pinned
+generator package (editable, `--no-deps`), then the generator's **runtime**
+libraries constrained to `exam_generator/constraints.txt`. It runs `pip check`
+and an import smoke test.
+
+> **Known dependency conflict (not auto-resolved):** the generator's
+> `constraints.txt` pins `pytest==9.1.1` while the backend needs `pytest==7.4.2`
+> + `pytest-flask==1.2.0`. Neither pin file is changed. The integrated backend
+> env keeps pytest 7.4.2; the generator's own test suite runs under its own
+> constraints in a separate env.
+
+**LLM generation** additionally needs `OPENAI_API_KEY` exported in the backend's
+environment (its *presence* is checked at `GET /api/exam-jobs/readiness`; the
+value is never read or logged). Without it — or without the generator's local
+`Data/` — the database-only features keep working; LLM job creation is refused
+with a safe reason.
+
+<details><summary>Manual / legacy setup (backend only, no generator)</summary>
+
+```bash
 cd backend
-
-# Create virtual environment
 python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
-
-# Install Python dependencies
+source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Create database directory
 mkdir -p src/database
-
-# Start the backend server
 python run.py
 ```
+</details>
 
 **Expected Output:**
 ```

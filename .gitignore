@@ -74,6 +74,11 @@ backend/src/database/*.db
 *_test.db
 app_test.db
 
+# --- WP18 exam-generation job state + per-slot generator audits ----------
+# Persistent job JSON lives on disk only, never in Git and never in app.db.
+artifacts/
+
+
 # ---------------------------------------------------------------------------
 # Markdown is TRACKED. The former blanket "*.md" ignore is removed so that
 # README.md, WPs/ and integration documentation are versioned.

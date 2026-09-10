@@ -55,6 +55,90 @@ def client(app):
     return app.test_client()
 
 
+# --------------------------------------------------------------------------- #
+# WP18: exam-generation job fixtures
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def jobs_root(tmp_path, monkeypatch):
+    """Point job persistence at a throwaway dir (never <repo>/artifacts)."""
+    root = tmp_path / "exam_jobs"
+    monkeypatch.setenv("EXAM_JOBS_ROOT", str(root))
+    return root
+
+
+@pytest.fixture(autouse=True)
+def _wp18_no_network(request, monkeypatch):
+    """Block real sockets for every WP18 test; the fakes never need one."""
+    if "wp18" not in request.node.nodeid:
+        return
+    import socket
+
+    def _no_connect(*a, **k):  # pragma: no cover
+        raise AssertionError("network access attempted during a WP18 test")
+
+    monkeypatch.setattr(socket.socket, "connect", _no_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _no_connect)
+
+
+@pytest.fixture()
+def llm_ready(monkeypatch):
+    """Make readiness pass: an in-process sentinel key (never a real one). The
+    generator data / pricing / category map are already present in the checked
+    out submodule, so readiness_report() then returns ready_for_llm=True."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-wp18-in-process-sentinel-not-a-real-key")
+    yield
+
+
+@pytest.fixture()
+def jobs_app(tmp_path, jobs_root):
+    """Flask app with the exam-jobs blueprint + a temp DB seeded across
+    categories. ``src.main`` is deliberately not imported."""
+    from flask import Flask
+
+    from src.models.user import db
+    from src.models.question import Question
+    from src.routes.exam_jobs import exam_jobs_bp
+    from src.routes.test_generation import test_gen_bp
+    from src.routes.upload import upload_bp
+
+    application = Flask(__name__)
+    db_path = tmp_path / "wp18_jobs_test.db"
+    application.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
+    application.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    application.config["TESTING"] = True
+    application.register_blueprint(exam_jobs_bp, url_prefix="/api")
+    application.register_blueprint(test_gen_bp, url_prefix="/api")
+    application.register_blueprint(upload_bp, url_prefix="/api")
+
+    db.init_app(application)
+    with application.app_context():
+        db.create_all()
+
+        def _add(category, n, start=0):
+            for i in range(start, start + n):
+                q = Question(
+                    category=category, question=f"{category} DB q{i}",
+                    answer1="א", answer2="ב", answer3="ג", answer4="ד",
+                    correct_answer_id=1,
+                )
+                q.categories = [category]
+                db.session.add(q)
+
+        _add("היסטולוגיה", 6)
+        _add("גרעיני הבסיס", 6)
+        _add("מבוא", 6)
+        db.session.commit()
+
+        yield application
+        db.session.remove()
+        db.drop_all()
+
+
+@pytest.fixture()
+def jobs_client(jobs_app):
+    return jobs_app.test_client()
+
+
 @pytest.fixture()
 def seed_questions(app):
     """Insert a handful of questions across a few canonical categories."""

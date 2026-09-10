@@ -11,6 +11,7 @@ from src.routes.user import user_bp
 from src.routes.upload import upload_bp
 from src.routes.test_generation import test_gen_bp
 from src.routes.exclusion_upload import exclusion_bp
+from src.routes.exam_jobs import exam_jobs_bp
 
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
@@ -25,6 +26,7 @@ app.register_blueprint(user_bp, url_prefix='/api')
 app.register_blueprint(upload_bp, url_prefix='/api')
 app.register_blueprint(test_gen_bp, url_prefix='/api')
 app.register_blueprint(exclusion_bp, url_prefix='/api')
+app.register_blueprint(exam_jobs_bp, url_prefix='/api')
 
 # Database configuration - use test database if TESTING environment variable is set
 db_filename = 'app_test.db' if os.environ.get('TESTING') == 'true' else 'app.db'
@@ -36,10 +38,21 @@ db.init_app(app)
 
 with app.app_context():
     db.create_all()
-    
+
     # Migrate existing JSON data to database if it exists
     from src.routes.upload import migrate_json_to_db
     migrate_json_to_db()
+
+# WP18: reload persisted exam-generation jobs; any job left "running" by a crash
+# becomes "interrupted" (its unfinished slots stay retryable). Billable LLM
+# calls are never auto-resumed.
+try:
+    from src.jobs import store as _job_store
+    _recovered = _job_store.recover_on_start()
+    if _recovered:
+        print(f"WP18: marked {len(_recovered)} interrupted exam job(s) as recoverable")
+except Exception as _exc:  # never block startup on job recovery
+    print(f"WP18: exam-job recovery skipped: {_exc}")
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
