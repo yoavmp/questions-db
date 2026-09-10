@@ -6,8 +6,8 @@ Routes (all under ``/api``)::
     GET    /exam-jobs/<job_id>                          -> progress / partial / final
     POST   /exam-jobs/<job_id>/slots/<slot_id>/retry    -> retry one failed/interrupted slot
     PUT    /exam-jobs/<job_id>/cost-ceiling             -> raise/lower the cap (>= accumulated)
-    POST   /exam-jobs/<job_id>/questions/<iid>/replace-db   -> swap a DB question
-    POST   /exam-jobs/<job_id>/questions/<iid>/replace-llm  -> regenerate a question
+    POST   /exam-jobs/<job_id>/questions/<iid>/replace-db   -> swap in a DB question (any accepted slot)
+    POST   /exam-jobs/<job_id>/questions/<iid>/replace-llm  -> regenerate a question (any accepted slot)
     GET    /exam-jobs/<job_id>/export.xlsx              -> accepted origin=llm questions only
     GET    /exam-jobs/readiness                         -> LLM readiness report
 

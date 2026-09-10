@@ -3,7 +3,7 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-10 · **Latest completed WP:** WP18 (backend exam-generation jobs).
+**Updated:** 2026-09-10 · **Latest completed WP:** WP18R (cross-source question replacement).
 **Next:** WP19 — switch the frontend to the job API; retire the synchronous
 `/api/test/generate` LLM path (DB-only `/api/test/*` stay until then).
 
@@ -11,7 +11,7 @@ question **generator** as a Git submodule.
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP18: integrate backend generation jobs` commit — `git rev-parse HEAD`)* | branch `main`; **not pushed** |
+| Outer `questions-db` | `.` | *(set by the `WP18R: allow cross-source question replacement` commit — `git rev-parse HEAD`; parent `d793a9f`)* | branch `main`; **not pushed** |
 | Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, clean, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
@@ -57,13 +57,24 @@ LLM readiness reports it missing otherwise).
 | Recorded generator pin (readiness drift check) | `backend/src/integration/generator_pin.py` |
 | Non-network LLM readiness service | `backend/src/integration/readiness.py` |
 | Persistent sequential job model / store / worker | `backend/src/jobs/{model,store,service}.py` |
+| Cross-source replacement (DB↔LLM, both endpoints, any accepted slot) | `backend/src/jobs/service.py::replace_from_db` / `replace_via_llm` (WP18R) |
 | Job + readiness API blueprint | `backend/src/routes/exam_jobs.py` (`/api/exam-jobs*`) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `backend/tests/test_wp18_*.py` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `backend/tests/test_wp18_*.py`, `backend/tests/test_wp18r_*.py` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
   `CATEGORY_ORDER` with live DB availability (incl. a zero-count category). The
   WP19 job UI should use it; WP18 adds no parallel categories route.
+- **Cross-source replacement (WP18R):** `POST …/replace-db` and `…/replace-llm`
+  each accept **any** accepted slot (DB→DB, LLM→DB, DB→LLM, LLM→LLM). `instance_id`,
+  `slot_id`, `category`, `order_in_category`, public `number` are stable; the
+  slot's `kind`/`db_id`/metadata and DTO `origin` switch to the new origin on
+  success. Only a displaced **LLM** question enters `category_history`
+  (post-success); a displaced DB question never does and never reaches a later
+  generator context. Cross-source failure is a full rollback (slot + Excel/DOCX
+  identical); a failed LLM attempt is still ledgered. Export = current
+  `kind == "llm"` only. `CategoryPlan.total/database/llm` stay at the original
+  request quotas.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,
@@ -87,6 +98,13 @@ LLM readiness reports it missing otherwise).
 
 - Confirm the in-process daemon-thread worker is acceptable (single-user desktop
   tool). A real queue/process is only needed for multi-user/multi-process.
+- **WP18R:** after a cross-source swap, `CategoryPlan.total/database/llm` still
+  hold the *original request* quotas (only live slot state + `db_selected_ids`
+  move). Per-category `accepted/failed/pending` in `progress_view` stay correct.
+  Decide whether the WP19 UI needs the quota line to track *realised* origins
+  (mutate the plan, or expose a separate realised count). Also: `replace_from_db`
+  still takes no run lock (unchanged from WP18) — fine for single-user, revisit
+  if WP19 adds concurrency.
 - Two dependency-pin conflicts between `backend/requirements.txt` and
   `exam_generator/constraints.txt` (`pytest` 7.4.2 vs 9.1.1; `MarkupSafe` 2.1.3
   vs 3.0.3) are documented in `scripts/dev_install.sh` and the WP18 report, not

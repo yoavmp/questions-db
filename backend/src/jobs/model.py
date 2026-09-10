@@ -201,7 +201,9 @@ class Job:
         ordered: list = []
         for plan in sorted(self.categories, key=lambda p: p.order_index):
             block = [s for s in self.slots if s.category == plan.category]
-            block.sort(key=lambda s: (0 if s.kind == "database" else 1, s.order_in_category))
+            # preserved global ``number`` drives order (stable across a
+            # cross-source replacement, which changes a slot's ``kind``)
+            block.sort(key=lambda s: s.number)
             for s in block:
                 if s.status == "accepted" and s.question:
                     ordered.append(s)
@@ -275,7 +277,7 @@ class Job:
                         "retries": s.retries,
                         "safe_error": s.safe_error,
                     }
-                    for s in sorted(block, key=lambda s: (0 if s.kind == "database" else 1, s.order_in_category))
+                    for s in sorted(block, key=lambda s: s.number)
                 ],
             }
         llm_slots = [s for s in self.slots if s.kind == "llm"]

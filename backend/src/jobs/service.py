@@ -253,10 +253,14 @@ def _previous_for_slot(job: Job, slot: Slot, *, exclude_instance: Optional[str] 
     block = [s for s in job.slots if s.category == slot.category and s.instance_id != slot.instance_id]
     if exclude_instance:
         block = [s for s in block if s.instance_id != exclude_instance]
-    for s in sorted(block, key=lambda s: (0 if s.kind == "database" else 1, s.order_in_category)):
+    # current-question prefix: DB questions first, then accepted LLM questions,
+    # each group in stable exam order (by preserved global ``number``). A slot's
+    # ``kind`` reflects its *current* origin, so a cross-source replacement moves
+    # it between these groups automatically.
+    for s in sorted(block, key=lambda s: s.number):
         if s.kind == "database" and s.question:
             prev.append({f: s.question[f] for f in SEVEN})
-    for s in sorted(block, key=lambda s: s.order_in_category):
+    for s in sorted(block, key=lambda s: s.number):
         if s.kind == "llm" and s.status == "accepted" and s.question:
             prev.append({f: s.question[f] for f in SEVEN})
     for h in job.category_history.get(slot.category, []):
@@ -345,7 +349,7 @@ def run_job(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) 
                 break
             llm_slots = [s for s in job.slots
                          if s.category == plan.category and s.kind == "llm" and s.status == "queued"]
-            for slot in sorted(llm_slots, key=lambda s: s.order_in_category):
+            for slot in sorted(llm_slots, key=lambda s: s.number):
                 # readiness immediately before the (billable) call
                 if provider is None:
                     report = readiness_report()
@@ -473,44 +477,118 @@ def retry_slot(job_id: str, slot_id: str, *, provider_factory: Optional[Provider
 
 
 # --------------------------------------------------------------------------- #
-# manual: replace one current question
+# manual: replace one current question (cross-source, WP18R)
 # --------------------------------------------------------------------------- #
+#: slot fields that describe the *currently held* question / its origin. Snapshot
+#: + restore these so a failed cross-source replacement leaves the slot (and its
+#: Excel/DOCX projection) byte-identical to before -- no history / origin /
+#: metadata mutation on failure.
+_SLOT_STATE_FIELDS = (
+    "kind", "status", "attempts", "retries", "safe_error",
+    "question", "db_id", "audit_ref", "was_repaired",
+)
+
+
+def _snapshot_slot(slot: Slot) -> dict:
+    snap = {k: getattr(slot, k) for k in _SLOT_STATE_FIELDS}
+    if snap["question"] is not None:
+        snap["question"] = dict(snap["question"])
+    return snap
+
+
+def _restore_slot(slot: Slot, snap: dict) -> None:
+    for k, v in snap.items():
+        setattr(slot, k, dict(v) if k == "question" and v is not None else v)
+
+
+def _apply_db_origin(slot: Slot, row: Any) -> None:
+    """Make ``slot`` a current DB question: ``kind=database``, integer ``db_id``,
+    the row's seven fields, DB defaults, no LLM generation metadata."""
+    slot.kind = "database"
+    slot.db_id = row.id
+    slot.question = _row_seven(row, slot.number)
+    slot.status = "accepted"
+    slot.attempts = 0
+    slot.retries = 0
+    slot.was_repaired = False
+    slot.audit_ref = None
+    slot.safe_error = None
+
+
+def _apply_llm_origin(slot: Slot) -> None:
+    """Make ``slot`` a current LLM question: ``kind=llm``, ``db_id=None``. The
+    seven fields / generation metadata were already set by ``_generate_one`` on
+    the accepted result."""
+    slot.kind = "llm"
+    slot.db_id = None
+
+
+def _recompute_db_selected_ids(job: Job, category: str) -> None:
+    plan = job.plan_for(category)
+    if plan is not None:
+        plan.db_selected_ids = [
+            s.db_id for s in job.slots
+            if s.category == category and s.kind == "database" and s.db_id is not None
+        ]
+
+
 def replace_from_db(job_id: str, instance_id: str, *, extra_exclude_ids: tuple = ()) -> Job:
-    """DB replacement: existing selector, excludes DB questions currently in the
-    exam. Preserves the slot's ``instance_id`` and ``number``. No cost. Needs an
-    app context."""
+    """DB replacement for **any** accepted slot -- DB->DB or LLM->DB (WP18R).
+
+    Uses the existing random selector, excluding DB questions currently in the
+    exam. Preserves the slot's ``instance_id``, category, order and public
+    ``number``. Costs nothing. Needs an app context.
+
+    Semantic history: a displaced **LLM** question is appended to that category's
+    ``category_history`` *after* the swap succeeds; a displaced **DB** question
+    is not (it may have been rejected for prior use / wording, not its concept).
+    On failure the slot is left exactly as it was.
+    """
     job = store.load(job_id)
     if job is None:
         raise JobError(f"job {job_id} not found")
     slot = job.slot_by_instance(instance_id)
     if slot is None:
         raise JobError(f"question {instance_id} not found in job {job_id}")
-    if slot.kind != "database":
-        raise JobConflict("this endpoint replaces a database question; use replace-llm for generated ones")
+    if slot.status != "accepted" or not slot.question:
+        raise JobConflict("only an accepted question can be replaced")
 
+    was_llm = slot.kind == "llm"
+    old_question = {f: slot.question[f] for f in SEVEN}
+
+    # exclude DB rows currently in the exam. For DB->DB the current slot's own
+    # db_id is in this set, so the swap always yields a *different* question; for
+    # LLM->DB the current slot has no db_id and nothing extra is excluded.
     in_exam = {s.db_id for s in job.slots if s.kind == "database" and s.db_id is not None}
     exclude = in_exam | set(extra_exclude_ids)
     rng = random.Random()
     try:
         chosen = _select_db_questions(slot.category, 1, exclude, rng)[0]
     except JobError as exc:
-        raise JobConflict(str(exc)) from exc
+        raise JobConflict(str(exc)) from exc  # slot untouched
 
-    # unchanged-on-failure is trivial here (selection either succeeds or raised)
-    slot.db_id = chosen.id
-    slot.question = _row_seven(chosen, slot.number)
-    job.plan_for(slot.category).db_selected_ids = [
-        s.db_id for s in job.slots if s.category == slot.category and s.kind == "database"
-    ]
+    _apply_db_origin(slot, chosen)
+    if was_llm:
+        job.category_history.setdefault(slot.category, []).append(old_question)
+    _recompute_db_selected_ids(job, slot.category)
     store.save(job)
     return job
 
 
 def replace_via_llm(job_id: str, instance_id: str, *,
                     provider_factory: Optional[ProviderFactory] = None) -> Job:
-    """LLM replacement: pass all OTHER current category questions plus that
-    category's generated/discarded history (order + repeated numbers preserved).
-    On success move the old question into history; on failure retain it."""
+    """LLM replacement for **any** accepted slot -- DB->LLM or LLM->LLM (WP18R).
+
+    The generator call receives every OTHER current category question plus that
+    category's prior displaced **LLM** questions (order + repeated numbers
+    preserved). The target's own old question is excluded from that context.
+
+    On success the slot becomes a current LLM question and -- only if it *was*
+    LLM-origin -- its old question is appended to ``category_history``. On failure
+    the slot (and its Excel/DOCX projection) is restored exactly, with no
+    history / origin / metadata mutation; the cost of the failed attempt is still
+    ledgered against the cumulative job budget.
+    """
     if not _RUN_LOCK.acquire(blocking=False):
         raise JobBusy("another exam-generation operation is already running")
     got_file_lock = False
@@ -521,29 +599,34 @@ def replace_via_llm(job_id: str, instance_id: str, *,
         slot = job.slot_by_instance(instance_id)
         if slot is None:
             raise JobError(f"question {instance_id} not found in job {job_id}")
-        if slot.kind != "llm":
-            raise JobConflict("this endpoint replaces a generated question; use replace-db for DB ones")
         if slot.status != "accepted" or not slot.question:
-            raise JobConflict("only an accepted generated question can be replaced")
+            raise JobConflict("only an accepted question can be replaced")
         got_file_lock = store.try_acquire_lock(job_id)
         if not got_file_lock:
             raise JobBusy("job is locked by another process")
 
+        was_llm = slot.kind == "llm"
+        snap = _snapshot_slot(slot)
         old_question = {f: slot.question[f] for f in SEVEN}
         provider = provider_factory() if provider_factory else None
-        previous = _previous_for_slot(job, slot)  # already excludes this slot
+        previous = _previous_for_slot(job, slot)  # already excludes this slot's old question
 
         slot.retries += 1
         result = _generate_one(job, slot, kind="replace_llm", provider=provider, previous=previous)
 
         if result is not None and result.status == "accepted":
-            job.category_history.setdefault(slot.category, []).append(old_question)
-            # slot.question / status already set to the new accepted question
+            _apply_llm_origin(slot)  # kind=llm, db_id=None; question/meta already set
+            if was_llm:
+                job.category_history.setdefault(slot.category, []).append(old_question)
+            _recompute_db_selected_ids(job, slot.category)
         else:
-            # retain the old question exactly
-            slot.question = old_question
-            slot.status = "accepted"
-            # keep slot.safe_error describing why the replacement failed
+            # failure: restore the slot exactly (question, origin, metadata),
+            # keeping only a safe_error describing why nothing changed.
+            reason = (
+                getattr(result, "failure_reason", None) if result is not None else None
+            ) or "LLM replacement did not produce an accepted question; original kept"
+            _restore_slot(slot, snap)
+            slot.safe_error = reason
 
         _finalise(job, stopped_by_ceiling=(result is not None and result.status == "cost_ceiling"))
         store.save(job)
