@@ -1,0 +1,3 @@
+[submodule "exam_generator"]
+	path = exam_generator
+	url = https://github.com/yoavmp/exam-generator.git

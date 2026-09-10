@@ -7,6 +7,7 @@ from flask import Blueprint, request, jsonify, make_response
 from src.models.user import db
 from src.models.question import Question, Category
 from src.utils.category_order import sort_questions_by_category, group_questions_by_category, get_category_order_index
+from src.utils.category_order import CATEGORY_ORDER, sort_categories
 import openpyxl
 from openpyxl import Workbook
 from io import BytesIO
@@ -15,13 +16,42 @@ test_gen_bp = Blueprint('test_generation', __name__)
 
 @test_gen_bp.route('/test/categories', methods=['GET'])
 def get_test_categories():
-    """Get all categories with their question counts for test generation"""
+    """Categories in the canonical backend order with live DB availability counts.
+
+    WP17 section 4: ``CATEGORY_ORDER`` is the sole external spelling and display
+    order. ``question_count`` is the live number of questions actually available
+    in that category (primary category OR a secondary category), computed the
+    same way ``/test/generate`` counts availability -- not the possibly-stale
+    ``Category.question_count`` column. The frontend renders this order as-is and
+    holds no category order of its own.
+    """
     try:
-        categories = Category.query.filter(Category.name != "כל השאלות").all()
-        return jsonify([{
-            'name': c.name,
-            'question_count': c.question_count
-        } for c in categories])
+        # every category name present in the DB (primary or secondary), minus the
+        # synthetic "all questions" bucket
+        db_names = {
+            c.name for c in Category.query.filter(Category.name != "כל השאלות").all()
+        }
+        for q in Question.query.with_entities(Question.category, Question.categories_json).all():
+            if q.category:
+                db_names.add(q.category)
+
+        def availability(name):
+            return Question.query.filter(
+                db.or_(
+                    Question.category == name,
+                    Question.categories_json.like(f'%"{name}"%'),
+                )
+            ).count()
+
+        # all 20 canonical categories in canonical order, then any extra DB
+        # category alphabetised at the end
+        extras = sort_categories([n for n in db_names if n not in CATEGORY_ORDER])
+        ordered = list(CATEGORY_ORDER) + extras
+
+        return jsonify([
+            {'name': name, 'question_count': availability(name)}
+            for name in ordered
+        ])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

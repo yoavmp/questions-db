@@ -24,6 +24,36 @@ A comprehensive web-based system for managing Hebrew exam questions with multipl
 
 ## 🚀 Quick Start
 
+### 0. Clone with submodules
+
+The Hebrew neuroanatomy question generator lives in the **`exam_generator/`
+Git submodule** (independent repository
+`https://github.com/yoavmp/exam-generator.git`, pinned to a verified commit).
+Clone the parent with its submodule in one step:
+
+```bash
+git clone --recurse-submodules https://github.com/yoavmp/questions-db.git
+```
+
+If you already cloned without `--recurse-submodules`:
+
+```bash
+git submodule update --init --recursive
+```
+
+To move the submodule to the commit this repository currently pins (e.g. after
+`git pull`):
+
+```bash
+git submodule update --init --recursive
+```
+
+The parent repository tracks only `.gitmodules` and the `exam_generator`
+gitlink — never the generator's individual files. Do not commit or push inside
+`exam_generator/`; it is updated on its own and re-pinned here by a dedicated
+integration work package. Its course material under `exam_generator/Data/` is
+git-ignored runtime input supplied out of band.
+
 ### 1. Backend Setup
 
 ```bash
@@ -46,7 +76,7 @@ pip install -r requirements.txt
 python run.py
 ```
 
-The backend will start on `http://localhost:5000`
+The backend will start on `http://localhost:4567`
 
 ### 2. Frontend Setup
 

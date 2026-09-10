@@ -1,19 +1,80 @@
+# ---------------------------------------------------------------------------
+# questions-db outer repository ignore rules
+#
+# Consolidated root .gitignore. Narrow, root-relative rules only. The
+# exam_generator submodule keeps its OWN .gitignore; nothing here reaches
+# across the submodule boundary (git never applies a parent .gitignore to a
+# submodule's working tree).
+# ---------------------------------------------------------------------------
+
+# --- OS / editor clutter ---------------------------------------------------
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# --- Python: bytecode, build and tool caches (outer project only) --------
+backend/**/__pycache__/
+backend/**/*.py[cod]
+backend/**/*.egg-info/
+backend/**/.pytest_cache/
+backend/**/.mypy_cache/
+backend/**/.ruff_cache/
+backend/**/.coverage
+backend/**/htmlcov/
+backend/.coverage
+# generic top-level fallbacks
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# --- Python virtual environments under the outer project -----------------
 .venv/
 venv/
-.env
-.ipynb_checkpoints/
-
-# Virtual-environment directories anywhere in the repository
+backend/venv/
+backend/idoVenv/
+backend/michalVenv/
+backend/MichalVenvNew/
+# any *venv* directory created beside the backend
+backend/*[Vv]env*/
 idoVenv/
 michalVenv/
 MichalVenvNew/
 
+# --- Local environment files (keep intentional *.env.example) ------------
+.env
+.env.*
+!.env.example
+!**/.env.example
 
-# Ignore all Markdown files
-*.md
+# --- Node / frontend: dependencies, builds, caches ----------------------
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/coverage/
+frontend/.vite/
+frontend/.eslintcache
+frontend/*.local
 
-# Keep the repository README
-!README.md
+# --- Production build output served by Flask ---------------------------
+backend/static/
+
+# --- Temporary / test databases (retain backend/src/database/app.db) ----
+backend/src/database/*.db
+!backend/src/database/app.db
+*_test.db
+app_test.db
+
+# ---------------------------------------------------------------------------
+# Markdown is TRACKED. The former blanket "*.md" ignore is removed so that
+# README.md, WPs/ and integration documentation are versioned.
+# ---------------------------------------------------------------------------
