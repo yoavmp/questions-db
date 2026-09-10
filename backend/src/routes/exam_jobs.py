@@ -3,7 +3,7 @@
 Routes (all under ``/api``)::
 
     POST   /exam-jobs                                  -> 202 {job_id, url}
-    GET    /exam-jobs/<job_id>                          -> progress / partial / final
+    GET    /exam-jobs/<job_id>                          -> progress / partial / final (+ attempt_telemetry)
     POST   /exam-jobs/<job_id>/slots/<slot_id>/retry    -> retry one failed/interrupted slot
     PUT    /exam-jobs/<job_id>/cost-ceiling             -> raise/lower the cap (>= accumulated)
     POST   /exam-jobs/<job_id>/questions/<iid>/replace-db   -> swap in a DB question (any accepted slot)
@@ -11,8 +11,10 @@ Routes (all under ``/api``)::
     GET    /exam-jobs/<job_id>/export.xlsx              -> accepted origin=llm questions only
     GET    /exam-jobs/readiness                         -> LLM readiness report
 
-The legacy synchronous ``/api/test/*`` endpoints are untouched (WP19 switches the
-frontend).
+As of WP19 ``replace-db`` takes the same process/file run lock as ``replace-llm``
+and ``retry`` (``JobBusy`` -> 409), so a double click or concurrent request
+cannot cause a lost update or a duplicate DB selection. The legacy synchronous
+``/api/test/*`` endpoints are untouched (WP19 switches the frontend).
 """
 
 from __future__ import annotations
@@ -126,6 +128,8 @@ def replace_db(job_id, instance_id):
         job = service.replace_from_db(job_id, instance_id, extra_exclude_ids=extra)
     except service.JobError as exc:
         return _err(str(exc), 404 if "not found" in str(exc) else 400)
+    except service.JobBusy as exc:
+        return _err(str(exc), 409)
     except service.JobConflict as exc:
         return _err(str(exc), 409)
     return jsonify(service.result_view(job))

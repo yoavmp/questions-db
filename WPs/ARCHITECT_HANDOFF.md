@@ -3,15 +3,16 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-10 · **Latest completed WP:** WP18R (cross-source question replacement).
-**Next:** WP19 — switch the frontend to the job API; retire the synchronous
-`/api/test/generate` LLM path (DB-only `/api/test/*` stay until then).
+**Updated:** 2026-09-10 · **Latest completed WP:** WP19 (frontend connected to the job API).
+**Next:** none scheduled. The "יצירת מבחן" screen now uses `/api/exam-jobs*` end to end; the
+legacy synchronous `/api/test/generate` + `/api/test/replace-question` endpoints are **still
+present** (nothing on the current screen calls them) and may be retired by a later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP18R: allow cross-source question replacement` commit — `git rev-parse HEAD`; parent `d793a9f`)* | branch `main`; **not pushed** |
+| Outer `questions-db` | `.` | *(set by the `WP19: connect exam generation frontend` commit — `git rev-parse HEAD`; parent `4cd86d1`)* | branch `main`; **not pushed** |
 | Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, clean, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
@@ -59,8 +60,11 @@ LLM readiness reports it missing otherwise).
 | Persistent sequential job model / store / worker | `backend/src/jobs/{model,store,service}.py` |
 | Cross-source replacement (DB↔LLM, both endpoints, any accepted slot) | `backend/src/jobs/service.py::replace_from_db` / `replace_via_llm` (WP18R) |
 | Job + readiness API blueprint | `backend/src/routes/exam_jobs.py` (`/api/exam-jobs*`) |
+| Ledger-derived attempt/retry telemetry (WP19) | `backend/src/jobs/service.py::ledger_telemetry` → `result_view()["attempt_telemetry"]` |
+| Job-API exam screen (WP19) | `frontend/src/components/ExamGenerationSection.jsx` + `frontend/src/lib/examGen.js` (pure) + `examApi.js` (client) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `backend/tests/test_wp18_*.py`, `backend/tests/test_wp18r_*.py` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py` |
+| Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
   `CATEGORY_ORDER` with live DB availability (incl. a zero-count category). The
@@ -74,7 +78,15 @@ LLM readiness reports it missing otherwise).
   generator context. Cross-source failure is a full rollback (slot + Excel/DOCX
   identical); a failed LLM attempt is still ledgered. Export = current
   `kind == "llm"` only. `CategoryPlan.total/database/llm` stay at the original
-  request quotas.
+  request quotas (request provenance only — no realised/current DB-vs-LLM
+  balance is computed or exposed anywhere; per-question `origin` is the only
+  composition signal).
+- **WP19:** `replace_from_db` now takes the same `_RUN_LOCK` + `job.lock` as
+  every other job mutation (`JobBusy → 409` on a double click / concurrent op).
+  `GET /api/exam-jobs/<id>` adds `attempt_telemetry` — attempt/retry/charged-
+  failure counters folded from the immutable `cost_ledger`, by category and slot,
+  so a charged failed attempt stays diagnosable after a rollback. No route/verb
+  or generator-boundary change.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,
@@ -94,23 +106,27 @@ LLM readiness reports it missing otherwise).
    suite is green (886→900 collected, 726 passed, 174 Data/font skips) and the
    targeted production tests pass network-blocked from this repo's env.
 
-**Open decisions for WP19**
+**Open items (post-WP19)**
 
-- Confirm the in-process daemon-thread worker is acceptable (single-user desktop
-  tool). A real queue/process is only needed for multi-user/multi-process.
-- **WP18R:** after a cross-source swap, `CategoryPlan.total/database/llm` still
-  hold the *original request* quotas (only live slot state + `db_selected_ids`
-  move). Per-category `accepted/failed/pending` in `progress_view` stay correct.
-  Decide whether the WP19 UI needs the quota line to track *realised* origins
-  (mutate the plan, or expose a separate realised count). Also: `replace_from_db`
-  still takes no run lock (unchanged from WP18) — fine for single-user, revisit
-  if WP19 adds concurrency.
+- The in-process daemon-thread worker is unchanged (single-user desktop tool);
+  `replace_from_db` now also serialises through `_RUN_LOCK` (WP19). Concurrent
+  job mutations return `409` and the frontend surfaces the reason. A real
+  queue/process is only needed for multi-user/multi-process.
+- **Realised origin count:** WP19 deliberately does **not** compute or display a
+  current DB-vs-LLM balance (owner ruling). If one is ever wanted it must be a
+  *separate* field, never a rewrite of `CategoryPlan.total/database/llm`.
+- Progress polling is a fixed 1.5 s interval (no backoff / websockets) — fine for
+  a sequential single-user job.
 - Two dependency-pin conflicts between `backend/requirements.txt` and
   `exam_generator/constraints.txt` (`pytest` 7.4.2 vs 9.1.1; `MarkupSafe` 2.1.3
   vs 3.0.3) are documented in `scripts/dev_install.sh` and the WP18 report, not
   resolved. A unified lockfile for the integrated env is optional.
-- `/api/test/generate`'s LLM behaviour: WP19 retires it in favour of jobs; keep
-  the DB-only path until the frontend switches.
+- Legacy `/api/test/generate` + `/api/test/replace-question` are unused by the UI
+  but still mounted; a later WP may retire them (`/api/test/categories` and
+  `/api/test/export-docx` stay — WP19 uses both).
+- Frontend now has a Vitest/Testing-Library harness (`npm test`); `@testing-
+  library/react@16` + `@testing-library/dom@10` are pinned so `user-event` and
+  RTL share one `dom` copy.
 
 ## 5. Authority order
 

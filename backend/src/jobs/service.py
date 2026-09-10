@@ -543,36 +543,56 @@ def replace_from_db(job_id: str, instance_id: str, *, extra_exclude_ids: tuple =
     ``category_history`` *after* the swap succeeds; a displaced **DB** question
     is not (it may have been rejected for prior use / wording, not its concept).
     On failure the slot is left exactly as it was.
+
+    Concurrency (WP19 §1): although a DB swap makes no provider call, it does a
+    read-modify-write of ``job.json`` (and, for LLM->DB, appends to
+    ``category_history``). It therefore takes the same process-wide ``_RUN_LOCK``
+    and per-job ``job.lock`` as every other job mutation, so a double click or a
+    concurrent ``run_job`` / retry / LLM replacement cannot lose an update,
+    select the same row twice or corrupt persistence. A held lock raises
+    ``JobBusy`` (HTTP 409); the slot is never touched in that case.
     """
-    job = store.load(job_id)
-    if job is None:
-        raise JobError(f"job {job_id} not found")
-    slot = job.slot_by_instance(instance_id)
-    if slot is None:
-        raise JobError(f"question {instance_id} not found in job {job_id}")
-    if slot.status != "accepted" or not slot.question:
-        raise JobConflict("only an accepted question can be replaced")
-
-    was_llm = slot.kind == "llm"
-    old_question = {f: slot.question[f] for f in SEVEN}
-
-    # exclude DB rows currently in the exam. For DB->DB the current slot's own
-    # db_id is in this set, so the swap always yields a *different* question; for
-    # LLM->DB the current slot has no db_id and nothing extra is excluded.
-    in_exam = {s.db_id for s in job.slots if s.kind == "database" and s.db_id is not None}
-    exclude = in_exam | set(extra_exclude_ids)
-    rng = random.Random()
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise JobBusy("another exam-generation operation is already running")
+    got_file_lock = False
     try:
-        chosen = _select_db_questions(slot.category, 1, exclude, rng)[0]
-    except JobError as exc:
-        raise JobConflict(str(exc)) from exc  # slot untouched
+        job = store.load(job_id)
+        if job is None:
+            raise JobError(f"job {job_id} not found")
+        slot = job.slot_by_instance(instance_id)
+        if slot is None:
+            raise JobError(f"question {instance_id} not found in job {job_id}")
+        if slot.status != "accepted" or not slot.question:
+            raise JobConflict("only an accepted question can be replaced")
+        got_file_lock = store.try_acquire_lock(job_id)
+        if not got_file_lock:
+            raise JobBusy("job is locked by another process")
 
-    _apply_db_origin(slot, chosen)
-    if was_llm:
-        job.category_history.setdefault(slot.category, []).append(old_question)
-    _recompute_db_selected_ids(job, slot.category)
-    store.save(job)
-    return job
+        was_llm = slot.kind == "llm"
+        old_question = {f: slot.question[f] for f in SEVEN}
+
+        # exclude DB rows currently in the exam. For DB->DB the current slot's
+        # own db_id is in this set, so the swap always yields a *different*
+        # question; for LLM->DB the current slot has no db_id and nothing extra
+        # is excluded.
+        in_exam = {s.db_id for s in job.slots if s.kind == "database" and s.db_id is not None}
+        exclude = in_exam | set(extra_exclude_ids)
+        rng = random.Random()
+        try:
+            chosen = _select_db_questions(slot.category, 1, exclude, rng)[0]
+        except JobError as exc:
+            raise JobConflict(str(exc)) from exc  # slot untouched
+
+        _apply_db_origin(slot, chosen)
+        if was_llm:
+            job.category_history.setdefault(slot.category, []).append(old_question)
+        _recompute_db_selected_ids(job, slot.category)
+        store.save(job)
+        return job
+    finally:
+        if got_file_lock:
+            store.release_lock(job_id)
+        _RUN_LOCK.release()
 
 
 def replace_via_llm(job_id: str, instance_id: str, *,
@@ -666,9 +686,110 @@ def update_cost_ceiling(job_id: str, new_cap: Any) -> Job:
 # --------------------------------------------------------------------------- #
 # result view + export
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# attempt / retry telemetry -- derived ONLY from the immutable cost ledger
+# --------------------------------------------------------------------------- #
+def ledger_telemetry(job: Job) -> dict:
+    """Attempt / retry / charged-failure telemetry folded from ``job.cost_ledger``.
+
+    The ledger is append-only: every generator call outcome (initial, retry,
+    LLM replacement -- accepted, rejected, refusal, systemic, cost-ceiling) is
+    recorded with its ``attempts``, ``kind``, ``status`` and ``total_cost_usd``.
+    A failed LLM replacement rolls the *slot* back (attempts/retries reset), but
+    its ledger row stays -- so a charged failed attempt remains diagnosable here
+    even though the slot shows no trace of it.
+
+    Shape::
+
+        {
+          "by_category": {<canonical>: {attempts, charged_failed_attempts,
+                                        retries, replacements, failed_attempts,
+                                        accepted, cost_usd, entries}},
+          "by_slot":     {<slot_id>:  {number, instance_id, category, kind,
+                                        ...same counters..., outcomes:[...]}},
+          "totals":      {...same counters..., ledger_entries},
+        }
+
+    ``by_category`` / ``by_slot`` never partition by *current* origin -- they are
+    a diagnostic history of generation effort, not a DB-vs-LLM balance.
+    """
+    def _blank() -> dict:
+        return {
+            "attempts": 0,
+            "failed_attempts": 0,
+            "charged_failed_attempts": 0,
+            "retries": 0,
+            "replacements": 0,
+            "accepted": 0,
+            "cost_usd": Decimal("0"),
+            "entries": 0,
+        }
+
+    by_cat: dict[str, dict] = {}
+    by_slot: dict[str, dict] = {}
+    totals = _blank()
+
+    for e in job.cost_ledger:
+        cat = e.get("category", "")
+        sid = e.get("slot_id", "")
+        status = e.get("status")
+        kind = e.get("kind")
+        attempts = int(e.get("attempts", 0) or 0)
+        cost = Decimal(str(e.get("total_cost_usd", "0") or "0"))
+        is_failure = status != "accepted"
+
+        cbucket = by_cat.setdefault(cat, _blank())
+        sbucket = by_slot.setdefault(sid, {
+            **_blank(),
+            "number": e.get("number"),
+            "instance_id": e.get("instance_id"),
+            "category": cat,
+            "kind": None,
+            "outcomes": [],
+        })
+        for b in (cbucket, sbucket, totals):
+            b["entries"] += 1
+            b["attempts"] += attempts
+            b["cost_usd"] += cost
+            if kind == "retry":
+                b["retries"] += 1
+            if kind == "replace_llm":
+                b["replacements"] += 1
+            if is_failure:
+                b["failed_attempts"] += 1
+                if cost > 0:
+                    b["charged_failed_attempts"] += 1
+            else:
+                b["accepted"] += 1
+        sbucket["outcomes"].append(status)
+
+    # match each slot's telemetry to its *current* kind for display convenience
+    for s in job.slots:
+        if s.slot_id in by_slot:
+            by_slot[s.slot_id]["kind"] = s.kind
+
+    def _finish(b: dict) -> dict:
+        out = dict(b)
+        out["cost_usd"] = str(b["cost_usd"])
+        return out
+
+    return {
+        "by_category": {k: _finish(v) for k, v in by_cat.items()},
+        "by_slot": {k: _finish(v) for k, v in by_slot.items()},
+        "totals": {**_finish(totals), "ledger_entries": len(job.cost_ledger)},
+    }
+
+
 def result_view(job: Job) -> dict:
     """Full/partial exam result: accepted questions as DTO dicts in canonical
-    order with contiguous global numbers, plus job progress."""
+    order with contiguous global numbers, plus job progress.
+
+    Note (WP19 §1): neither this view nor ``progress_view`` reports a *current*
+    DB-vs-LLM composition. ``categories[*].database`` / ``.llm`` are the original
+    request quotas (provenance only); per-question origin is the ``origin`` field
+    on each entry of ``questions``. Replacements may move that balance freely and
+    nothing here recomputes or enforces it.
+    """
     dtos: list[dict] = []
     for pos, slot in enumerate(job.accepted_questions_ordered(), 1):
         if slot.kind == "database":
@@ -691,6 +812,7 @@ def result_view(job: Job) -> dict:
     view["questions"] = dtos
     view["category_history"] = job.category_history
     view["cost_ledger"] = job.cost_ledger
+    view["attempt_telemetry"] = ledger_telemetry(job)
     return view
 
 
