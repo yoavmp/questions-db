@@ -487,6 +487,29 @@ describe('results and replacements', () => {
     expect(screen.queryByTestId('current-composition')).not.toBeInTheDocument()
   })
 
+  it('never renders internal semantic history (category_history) on the exam screen', async () => {
+    await renderResumed(
+      makeView({
+        category_history: {
+          מבוא: [
+            {
+              number: 2,
+              question: 'שאלת בינה שהוחלפה — היסטוריה סמנטית פנימית',
+              answer1: 'א', answer2: 'ב', answer3: 'ג', answer4: 'ד',
+              correct_answer: 2,
+            },
+          ],
+        },
+      }),
+    )
+    // the screen shows the current questions but not the internal uniqueness state
+    expect(screen.getByText('1. שאלת מאגר 1')).toBeInTheDocument()
+    expect(screen.queryByText('שאלות בינה שהוחלפו')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/היסטוריה סמנטית פנימית/),
+    ).not.toBeInTheDocument()
+  })
+
   it('renders ledger-derived attempt telemetry and cost warnings', async () => {
     await renderResumed(
       makeView({

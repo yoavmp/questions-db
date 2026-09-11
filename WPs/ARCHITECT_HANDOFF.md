@@ -3,17 +3,20 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-10 · **Latest completed WP:** WP19 (frontend connected to the job API).
-**Next:** none scheduled. The "יצירת מבחן" screen now uses `/api/exam-jobs*` end to end; the
-legacy synchronous `/api/test/generate` + `/api/test/replace-question` endpoints are **still
-present** (nothing on the current screen calls them) and may be retired by a later WP.
+**Updated:** 2026-09-11 · **Latest completed WP:** WP20 (live end-to-end validation + `category_history`
+hidden from the exam UI).
+**Next:** none scheduled. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end and has now been
+validated against a real local backend + real OpenAI generation (one small mixed job, $0.087 of a
+$1.00 authorized ceiling). The legacy synchronous `/api/test/generate` + `/api/test/replace-question`
+endpoints are **still present** (nothing on the current screen calls them) and may be retired by a
+later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP19: connect exam generation frontend` commit — `git rev-parse HEAD`; parent `4cd86d1`)* | branch `main`; **not pushed** |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, clean, **do not commit/push here** |
+| Outer `questions-db` | `.` | *(set by the `WP20: validate live integrated exam flow` commit — `git rev-parse HEAD`; parent `d41f4f4`)* | branch `main`; **not pushed** |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, clean bar an untracked `.DS_Store`, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
 contains `ea59cd8` (WP17GR). Pre-submodule snapshot preserved at
@@ -63,7 +66,7 @@ LLM readiness reports it missing otherwise).
 | Ledger-derived attempt/retry telemetry (WP19) | `backend/src/jobs/service.py::ledger_telemetry` → `result_view()["attempt_telemetry"]` |
 | Job-API exam screen (WP19) | `frontend/src/components/ExamGenerationSection.jsx` + `frontend/src/lib/examGen.js` (pure) + `examApi.js` (client) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py` |
 | Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
@@ -87,6 +90,24 @@ LLM readiness reports it missing otherwise).
   failure counters folded from the immutable `cost_ledger`, by category and slot,
   so a charged failed attempt stays diagnosable after a rollback. No route/verb
   or generator-boundary change.
+- **WP20 (UI only — no backend change):** `frontend/src/components/ExamGenerationSection.jsx` no
+  longer renders `category_history` anywhere (the "שאלות בינה שהוחלפו" card was removed). The field
+  still round-trips through backend persistence and still feeds `_previous_for_slot` for later LLM
+  generation, and it still appears in `result_view` as backend diagnostic data — only the
+  user-facing screen stopped showing it. New tests on both sides prove this
+  (`ExamGenerationSection.test.jsx`, `backend/tests/test_wp20_semantic_history_boundary.py`).
+- **WP20 live validation:** one real job against the owner's local backend + real OpenAI calls —
+  `היסטולוגיה`, `C=2/A=1/B=1`, $1.00 ceiling, **2 provider ops, $0.0869755 total (8.7% of cap)**,
+  0 failures/retries. Confirmed live: DB-first selection with the DB question in the LLM's
+  previous-question context; DB→LLM via `צור שאלה אחרת` does **not** add the displaced DB question
+  to `category_history`; LLM→DB via `החלף בשאלה מהמאגר` **does** retain the displaced LLM question
+  there (and it then appears in the next generation's context); stable `instance_id`/`number`/
+  `category` across both transitions; Excel export = current LLM question only, no DB insert;
+  Hebrew DOCX (± answers) strips job metadata, keeps the endpoint's own answer-shuffle, renders
+  RTL. Full detail, per-operation costs, and the two accepted questions' seven fields are in
+  `WPs/WP20_ARCHITECT_REPORT.md`. **Finding:** no cost line is ever printed to the backend
+  terminal in this codebase — cumulative cost is API/ledger-only (see that report §4.3) if a
+  future WP wants to add one.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,
@@ -106,7 +127,18 @@ LLM readiness reports it missing otherwise).
    suite is green (886→900 collected, 726 passed, 174 Data/font skips) and the
    targeted production tests pass network-blocked from this repo's env.
 
-**Open items (post-WP19)**
+**Open items (post-WP20)**
+
+- **No backend-terminal cost line exists.** WP20's live run found no `print`/`logger` call anywhere
+  in `backend/src/` or the generator's `production.py` that emits a cost figure to stdout — the
+  backend terminal only ever shows Flask's request log and the WP18 startup recovery line.
+  Cumulative cost is exposed only via the JSON API and the on-disk `cost_ledger`. If a
+  human-readable terminal summary is ever wanted, it needs a new WP.
+- No live failure/retry/rollback was exercised in WP20 (by design, to stay inside the one
+  authorized paid job) — that surface keeps relying on the offline fake-provider suites
+  (`test_wp18r_cross_source_replacements.py`, `test_wp19_frontend_contract.py`).
+- No browser-automation tool (Playwright/Puppeteer/Cypress) is installed in this environment; a
+  future live UI validation would need one added first if a literal click-through is required.
 
 - The in-process daemon-thread worker is unchanged (single-user desktop tool);
   `replace_from_db` now also serialises through `_RUN_LOCK` (WP19). Concurrent

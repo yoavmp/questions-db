@@ -544,7 +544,6 @@ export default function ExamGenerationSection() {
   const tel = job?.attempt_telemetry
   const retryList = retryableSlots(job || {})
   const anyBusy = !!mutating || !!retryingSlotId || raisingCeiling
-  const history = job?.category_history || {}
 
   return (
     <div className="space-y-6">
@@ -775,24 +774,6 @@ export default function ExamGenerationSection() {
           )}
         </CardContent>
       </Card>
-
-      {/* displaced LLM history (retained per the backend policy) */}
-      {Object.values(history).some((h) => (h || []).length > 0) && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="hebrew-text">שאלות בינה שהוחלפו</CardTitle>
-          </CardHeader>
-          <CardContent className="hebrew-text text-sm space-y-1">
-            {Object.entries(history).map(([name, hs]) =>
-              (hs || []).map((h, i) => (
-                <p key={`${name}-${i}`} className="text-gray-600">
-                  {name} #{h.number}: {h.question}
-                </p>
-              )),
-            )}
-          </CardContent>
-        </Card>
-      )}
     </div>
   )
 }
