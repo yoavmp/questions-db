@@ -534,7 +534,8 @@ describe('results and replacements', () => {
     const tel = screen.getByTestId('telemetry')
     expect(tel).toHaveTextContent('סה"כ ניסיונות: 4')
     expect(tel).toHaveTextContent('נכשלו וחויבו: 2')
-    expect(tel).toHaveTextContent('ניסיונות חוזרים: 1')
+    expect(tel).toHaveTextContent('ניסיונות חוזרים לאחר כשל: 1')
+    expect(tel).toHaveTextContent('החלפות LLM: 1')
     expect(screen.getByText(/מחירון ישן/)).toBeInTheDocument()
   })
 
@@ -677,7 +678,7 @@ describe('WP21 - category headings, analytics, ledger-derived counts', () => {
     expect(screen.queryByText(/ח=/)).not.toBeInTheDocument()
   })
 
-  it('keeps a failed paid replace_llm visible via ledger-derived counts even though the mutable slot/generation_meta counters rolled back (§6)', async () => {
+  it('keeps a failed paid replace_llm visible via ledger-derived counts even though the mutable slot/generation_meta counters rolled back (§6), and never counts it as a failure-retry (WP21R §2)', async () => {
     const view = makeView({
       questions: [
         dbQuestion(1, 'iid-db'),
@@ -690,8 +691,8 @@ describe('WP21 - category headings, analytics, ledger-derived counts', () => {
           מבוא: { attempts: 2, failed_attempts: 1, charged_failed_attempts: 1, retries: 0, replacements: 1, accepted: 1, cost_usd: '0.09', entries: 2 },
         },
         by_slot: {
-          's-db': { instance_id: 'iid-db', attempts: 0, retries: 0, replacements: 0, kind: 'database', category: 'מבוא', number: 1, outcomes: [] },
-          's-llm': { instance_id: 'iid-llm', attempts: 2, retries: 0, replacements: 1, kind: 'llm', category: 'מבוא', number: 2, outcomes: ['accepted', 'question_rejected'] },
+          's-db': { instance_id: 'iid-db', attempts: 0, failed_attempts: 0, retries: 0, replacements: 0, kind: 'database', category: 'מבוא', number: 1, outcomes: [] },
+          's-llm': { instance_id: 'iid-llm', attempts: 2, failed_attempts: 1, retries: 0, replacements: 1, kind: 'llm', category: 'מבוא', number: 2, outcomes: ['accepted', 'question_rejected'] },
         },
         totals: { attempts: 2, failed_attempts: 1, charged_failed_attempts: 1, retries: 0, replacements: 1, accepted: 1, cost_usd: '0.09', entries: 2, ledger_entries: 2 },
       },
@@ -699,7 +700,34 @@ describe('WP21 - category headings, analytics, ledger-derived counts', () => {
     await renderResumed(view)
     const llmCard = screen.getByText('2. שאלת בינה 2').closest('div.p-4')
     expect(within(llmCard).getByText(/ניסיונות: 2/)).toBeInTheDocument()
-    expect(within(llmCard).getByText(/חזרות: 1/)).toBeInTheDocument()
+    // an intentional replacement, distinctly labeled -- never folded into a "retries" figure
+    expect(within(llmCard).getByText(/החלפות LLM: 1/)).toBeInTheDocument()
+    expect(within(llmCard).queryByText(/ניסיונות חוזרים לאחר כשל/)).not.toBeInTheDocument()
+    // the failed (charged) attempt behind that replacement stays visible too
+    expect(within(llmCard).getByText(/נכשלו: 1/)).toBeInTheDocument()
+  })
+
+  it('shows a genuine failure retry as "ניסיונות חוזרים לאחר כשל", separate from any replacement (WP21R §2)', async () => {
+    const view = makeView({
+      questions: [
+        dbQuestion(1, 'iid-db'),
+        { ...llmQuestion(2, 'iid-llm'), generation_meta: { attempts: 2, retries_by_slot: 1, cost_usd: '0.05', outcome: 'accepted' } },
+      ],
+      attempt_telemetry: {
+        by_category: {
+          מבוא: { attempts: 2, failed_attempts: 1, charged_failed_attempts: 0, retries: 1, replacements: 0, accepted: 1, cost_usd: '0.05', entries: 2 },
+        },
+        by_slot: {
+          's-db': { instance_id: 'iid-db', attempts: 0, failed_attempts: 0, retries: 0, replacements: 0, kind: 'database', category: 'מבוא', number: 1, outcomes: [] },
+          's-llm': { instance_id: 'iid-llm', attempts: 2, failed_attempts: 1, retries: 1, replacements: 0, kind: 'llm', category: 'מבוא', number: 2, outcomes: ['question_rejected', 'accepted'] },
+        },
+        totals: { attempts: 2, failed_attempts: 1, charged_failed_attempts: 0, retries: 1, replacements: 0, accepted: 1, cost_usd: '0.05', entries: 2, ledger_entries: 2 },
+      },
+    })
+    await renderResumed(view)
+    const llmCard = screen.getByText('2. שאלת בינה 2').closest('div.p-4')
+    expect(within(llmCard).getByText(/ניסיונות חוזרים לאחר כשל: 1/)).toBeInTheDocument()
+    expect(within(llmCard).queryByText(/החלפות LLM/)).not.toBeInTheDocument()
   })
 
   it('never shows category_history and never a current DB/LLM aggregate alongside the new sections', async () => {

@@ -382,24 +382,38 @@ describe('overallAnalytics (recovered legacy formula)', () => {
   })
 })
 
-describe('slotAttemptCounts / slotAttemptCountsByInstance (ledger-derived, §6)', () => {
+describe('slotAttemptCounts / slotAttemptCountsByInstance (ledger-derived, §6, WP21R §2)', () => {
   const telemetry = {
     by_slot: {
-      's-1': { instance_id: 'iid-1', attempts: 2, retries: 0, replacements: 1 },
+      's-1': { instance_id: 'iid-1', attempts: 3, failed_attempts: 1, retries: 1, replacements: 1 },
     },
   }
 
-  it('folds retries + replacements into one "חזרות" figure', () => {
-    expect(slotAttemptCounts(telemetry, 's-1')).toEqual({ attempts: 2, retries: 1 })
+  it('keeps retries and replacements as separate figures, never folded together', () => {
+    expect(slotAttemptCounts(telemetry, 's-1')).toEqual({
+      attempts: 3, retries: 1, replacements: 1, failedAttempts: 1,
+    })
+  })
+
+  it('an intentional replacement never appears as a retry', () => {
+    const replaceOnly = {
+      by_slot: { 's-2': { instance_id: 'iid-2', attempts: 2, failed_attempts: 1, retries: 0, replacements: 1 } },
+    }
+    const counts = slotAttemptCounts(replaceOnly, 's-2')
+    expect(counts.retries).toBe(0)
+    expect(counts.replacements).toBe(1)
   })
 
   it('looks a slot up by its stable instance_id, not slot_id', () => {
-    expect(slotAttemptCountsByInstance(telemetry, 'iid-1')).toEqual({ attempts: 2, retries: 1 })
+    expect(slotAttemptCountsByInstance(telemetry, 'iid-1')).toEqual({
+      attempts: 3, retries: 1, replacements: 1, failedAttempts: 1,
+    })
   })
 
-  it('an unknown slot/instance is 0/0, not a crash', () => {
-    expect(slotAttemptCounts(telemetry, 'missing')).toEqual({ attempts: 0, retries: 0 })
-    expect(slotAttemptCountsByInstance(telemetry, 'missing')).toEqual({ attempts: 0, retries: 0 })
-    expect(slotAttemptCounts(null, 's-1')).toEqual({ attempts: 0, retries: 0 })
+  it('an unknown slot/instance is all-zero, not a crash', () => {
+    const zero = { attempts: 0, retries: 0, replacements: 0, failedAttempts: 0 }
+    expect(slotAttemptCounts(telemetry, 'missing')).toEqual(zero)
+    expect(slotAttemptCountsByInstance(telemetry, 'missing')).toEqual(zero)
+    expect(slotAttemptCounts(null, 's-1')).toEqual(zero)
   })
 })

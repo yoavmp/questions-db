@@ -276,18 +276,33 @@ export function overallAnalytics(questions, threshold) {
   }
 }
 
-// --- ledger-derived attempt/retry counts (WP21 §6) ------------------------
+// --- ledger-derived attempt/retry/replacement counts (WP21 §6, WP21R §2) --
 
 // Question-card counts must come from the immutable cost_ledger (via
 // attempt_telemetry.by_slot), not the mutable slot.attempts/slot.retries --
 // a failed paid replace_llm rolls the SLOT back to its pre-attempt state
 // (WP18R), so those mutable counters silently lose it; the ledger never does.
-// "חזרות" (retries) folds both job-level retries AND LLM replacement
-// attempts on that slot -- either kind of "try again" the owner asked for.
+//
+// WP21R owner decision: `retries` (failure retries) and `replacements`
+// (intentional replace_llm calls) are kept SEPARATE, never folded into one
+// "חזרות" figure -- an intentional replacement must never inflate the
+// displayed failure-retry count. `failedAttempts` is exposed too so a
+// nonzero failure count stays visible even after a rollback restores the
+// slot's own mutable counters.
+const _BLANK_COUNTS = { attempts: 0, retries: 0, replacements: 0, failedAttempts: 0 }
+
+function _counts(b) {
+  if (!b) return { ..._BLANK_COUNTS }
+  return {
+    attempts: b.attempts || 0,
+    retries: b.retries || 0,
+    replacements: b.replacements || 0,
+    failedAttempts: b.failed_attempts || 0,
+  }
+}
+
 export function slotAttemptCounts(telemetry, slotId) {
-  const b = telemetry?.by_slot?.[slotId]
-  if (!b) return { attempts: 0, retries: 0 }
-  return { attempts: b.attempts || 0, retries: (b.retries || 0) + (b.replacements || 0) }
+  return _counts(telemetry?.by_slot?.[slotId])
 }
 
 // A result question DTO only carries `instance_id` (stable across
@@ -296,11 +311,9 @@ export function slotAttemptCounts(telemetry, slotId) {
 export function slotAttemptCountsByInstance(telemetry, instanceId) {
   const bySlot = telemetry?.by_slot || {}
   for (const b of Object.values(bySlot)) {
-    if (b.instance_id === instanceId) {
-      return { attempts: b.attempts || 0, retries: (b.retries || 0) + (b.replacements || 0) }
-    }
+    if (b.instance_id === instanceId) return _counts(b)
   }
-  return { attempts: 0, retries: 0 }
+  return { ..._BLANK_COUNTS }
 }
 
 export function isTerminalStatus(status) {

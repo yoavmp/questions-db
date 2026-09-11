@@ -7,6 +7,9 @@ Layout (all git-ignored)::
         job.json            # the whole Job, atomically replaced on every change
         job.lock            # best-effort cross-process run lock
         slots/<slot_id>/    # per-slot generator audit dir
+          <operation>_<seq>_<uuid>/          # one invocation, never reused (WP21R §3)
+            invocation_manifest.json           # safe identifiers only, written pre-call
+            attempt_01/ ...                     # the generator's own per-attempt evidence
 
 * ``job_id`` / ``slot_id`` are UUIDs; every path is validated to stay inside the
   jobs root (no traversal).
@@ -24,16 +27,23 @@ import os
 import re
 import tempfile
 import threading
+import uuid as _uuid
 from pathlib import Path
 from typing import Optional
 
-from src.jobs.model import Job
+from src.jobs.model import Job, now_iso
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
-#: one top-level invocation's audit-directory name: "<kind>_<4-digit seq>",
-#: e.g. "initial_0001", "retry_0002", "replace_llm_0003" -- see
-#: ``invocation_audit_dir`` (WP21 §7).
-_INVOCATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+#: one top-level invocation's audit-directory name: "<operation>_<4-digit
+#: seq>_<uuid4>", e.g. "initial_0001_3fa85f64-5717-4562-b3fc-2c963f66afa6" --
+#: see ``invocation_audit_dir`` (WP21R §3). The trailing UUID is the
+#: authoritative, collision-proof identity; "<operation>_<seq>" is
+#: human-readable context only and MAY repeat across invocations (e.g. after
+#: a crash recomputes the same sequence number) without causing a collision.
+_INVOCATION_RE = re.compile(
+    r"^(initial|retry|replace_llm)_[0-9]{4}_"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # process-wide guard around job.json writes (atomic replace still protects
 # cross-process, this just avoids interleaved temp files in one process)
@@ -77,27 +87,91 @@ def slot_audit_dir(job_id: str, slot_id: str) -> Path:
     return d
 
 
+def new_invocation_uuid() -> str:
+    """A fresh, securely-random UUID identifying one top-level LLM invocation
+    (WP21R §3). This is the sole authoritative collision-proof identity for
+    an invocation directory -- ``uuid.uuid4()`` draws from the OS CSPRNG."""
+    return str(_uuid.uuid4())
+
+
+def invocation_dir_name(operation: str, sequence: int, invocation_uuid: str) -> str:
+    """Build ``"<operation>_<4-digit sequence>_<uuid>"`` -- the human-readable
+    ``operation``/``sequence`` prefix is context only; ``invocation_uuid`` is
+    what actually guarantees this name is never reused (WP21R §3)."""
+    if operation not in ("initial", "retry", "replace_llm"):
+        raise ValueError(f"invalid operation {operation!r}")
+    return f"{operation}_{int(sequence):04d}_{invocation_uuid}"
+
+
 def invocation_audit_dir(job_id: str, slot_id: str, invocation_id: str) -> Path:
     """A fresh, never-reused audit directory for ONE top-level LLM invocation
-    (initial run / retry / replace_llm) on one slot (WP21 §7).
+    (initial run / retry / replace_llm) on one slot (WP21 §7, hardened WP21R
+    §3).
 
     Earlier code passed the same ``slot_audit_dir`` to every invocation on a
     slot; the generator's own internal ``attempt_01``/``attempt_02`` counter
     then restarted at 1 each time, so a later invocation silently overwrote an
-    earlier one's evidence. Every invocation now gets its own subdirectory
-    named ``<kind>_<seq>`` (``seq`` = that invocation's eventual
-    ``cost_ledger`` position) -- collision-resistant, monotonic, and never
-    reused, so nothing written under an earlier invocation is ever touched
-    again. ``invocation_id`` must be a safe token (letters/digits/underscore
-    only) -- this is also the relative audit reference stored on the
-    matching ledger entry and slot, safe to surface in the UI (no absolute
-    path, no prompt/response content).
+    earlier one's evidence. WP21 gave every invocation its own subdirectory
+    named ``<kind>_<seq>`` -- but ``seq`` was ``len(cost_ledger) + 1``,
+    computed *before* the (possibly crashing) provider call and only made
+    durable *after* it returns (``_record_cost`` appends to the ledger). A
+    crash in between left ``cost_ledger`` unchanged, so the next invocation
+    recomputed the *same* ``seq`` and, with the old ``exist_ok=True``,
+    silently reused (and could overwrite evidence inside) the crashed
+    invocation's directory.
+
+    ``invocation_id`` is now ``<operation>_<seq>_<uuid>`` (see
+    ``invocation_dir_name``): the UUID is generated fresh for every call and
+    never recomputed from mutable state, so two invocations can never collide
+    even if a crash makes them share the same ``operation``/``seq`` prefix.
+    ``exist_ok=False`` turns any such collision (which should be
+    cryptographically impossible) into a loud error instead of silent
+    directory reuse -- this function must never delete or step around an
+    existing path to manufacture a free one. ``invocation_id`` must match
+    ``_INVOCATION_RE`` -- it is also the relative audit reference stored on
+    the matching ledger entry and slot, safe to surface in the UI (no
+    absolute path, no prompt/response content).
     """
     if not _INVOCATION_RE.match(invocation_id or ""):
         raise ValueError(f"invalid invocation id {invocation_id!r}")
     d = slot_audit_dir(job_id, slot_id) / invocation_id
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=False)
     return d
+
+
+#: safe field names for ``write_invocation_manifest`` (WP21R §3) -- job/slot
+#: identifiers, operation metadata and timestamps only; deliberately excludes
+#: anything that could carry a question, prompt, response, source content or
+#: credential (name or value), and never an absolute filesystem path.
+_MANIFEST_FIELDS = frozenset({"job_id", "slot_id", "operation", "sequence", "invocation_uuid", "created_at"})
+
+
+def write_invocation_manifest(audit_dir: Path, manifest: dict) -> None:
+    """Atomically write ``invocation_manifest.json`` into ``audit_dir`` (WP21R
+    §3), *before* the provider boundary, so a crash mid-call still leaves
+    behind enough to diagnose the orphaned directory without prompts,
+    responses or credentials.
+
+    ``manifest`` must contain only keys from ``_MANIFEST_FIELDS``. The write
+    is temp-file-then-``os.replace`` (like ``save``), so a reader never sees
+    a half-written manifest, and a crash before the ``os.replace`` simply
+    leaves no manifest at all rather than a corrupt one.
+    """
+    extra = set(manifest) - _MANIFEST_FIELDS
+    if extra:
+        raise ValueError(f"manifest has unsafe field(s): {sorted(extra)}")
+    payload = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True)
+    fd, tmp = tempfile.mkstemp(dir=str(audit_dir), prefix=".invocation_manifest.", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(payload)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, str(audit_dir / "invocation_manifest.json"))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _job_file(job_id: str) -> Path:

@@ -235,14 +235,18 @@ def _fold_basis(existing: str, new: str) -> str:
 
 
 def _record_cost(job: Job, *, kind: str, slot: Slot, result: Any,
-                 audit_ref: Optional[str] = None) -> None:
+                 audit_ref: Optional[str] = None,
+                 invocation_uuid: Optional[str] = None) -> None:
     """Add one generator call's cost to the job ledger + accumulator.
 
     ``audit_ref`` (WP21 §7) is the safe *relative* invocation-directory path
-    for this specific call (e.g. ``slots/<slot_id>/replace_llm_0003``) --
-    never an absolute path, never prompt/response content -- so a failed
+    for this specific call (e.g. ``slots/<slot_id>/replace_llm_0003_<uuid>``)
+    -- never an absolute path, never prompt/response content -- so a failed
     attempt stays traceable to its own on-disk evidence even after the slot
-    itself rolls back to a different (or no) ``audit_ref``.
+    itself rolls back to a different (or no) ``audit_ref``. ``invocation_uuid``
+    (WP21R §3) is the same call's authoritative collision-proof identity,
+    also embedded in ``audit_ref`` -- kept as its own field so a ledger
+    record can be matched to its on-disk manifest without parsing the ref.
     """
     cost = Decimal(str(getattr(result, "cost_usd", "0") or "0"))
     job.accumulated_cost_usd = str(Decimal(job.accumulated_cost_usd) + cost)
@@ -267,6 +271,7 @@ def _record_cost(job: Job, *, kind: str, slot: Slot, result: Any,
         "retries": getattr(result, "retries", 0),
         "warnings": [w.get("code") for w in getattr(result, "warnings", []) or []],
         "audit_ref": audit_ref,
+        "invocation_uuid": invocation_uuid,
         "at": now_iso(),
     })
 
@@ -315,15 +320,36 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
     slot.attempts += 1
     store.save(job)
 
-    # WP21 §7: a fresh, never-reused invocation directory for THIS call --
-    # "<kind>_<seq>", seq = this call's eventual cost_ledger position. Nothing
-    # else appends to cost_ledger between this read and _record_cost's append
-    # (the run lock keeps the worker sequential), so seq is exact, monotonic
-    # and collision-resistant -- a later call can never overwrite this one's
-    # evidence, unlike the shared per-slot directory used before WP21.
-    invocation_id = f"{kind}_{len(job.cost_ledger) + 1:04d}"
-    audit_dir = str(store.invocation_audit_dir(job.job_id, slot.slot_id, invocation_id))
+    # WP21R §3: the directory name's "<kind>_<seq>" prefix (seq = this call's
+    # *expected* cost_ledger position) is human-readable context only -- it is
+    # NOT collision-proof on its own. If the process crashes anywhere inside
+    # `generate_category_question` below, `_record_cost` never runs, so
+    # `len(job.cost_ledger) + 1` recomputes to this SAME seq on the next
+    # invocation for this slot. What actually prevents a collision is
+    # `invocation_uuid`: freshly drawn every call, never derived from mutable
+    # state, so two invocations can never collide even if they share a
+    # "<kind>_<seq>" prefix. `invocation_audit_dir` also refuses (rather than
+    # silently reusing) any path that already exists.
+    seq = len(job.cost_ledger) + 1
+    invocation_uuid = store.new_invocation_uuid()
+    invocation_id = store.invocation_dir_name(kind, seq, invocation_uuid)
+    audit_dir_path = store.invocation_audit_dir(job.job_id, slot.slot_id, invocation_id)
+    audit_dir = str(audit_dir_path)
     audit_ref = f"slots/{slot.slot_id}/{invocation_id}"
+
+    # WP21R §3: a small, atomic, secret-free manifest written BEFORE the
+    # provider boundary -- if the process dies anywhere inside the call
+    # below, this manifest alone (no prompt/response/source content, no
+    # credential, no absolute path) is enough to diagnose the orphaned
+    # directory.
+    store.write_invocation_manifest(audit_dir_path, {
+        "job_id": job.job_id,
+        "slot_id": slot.slot_id,
+        "operation": kind,
+        "sequence": seq,
+        "invocation_uuid": invocation_uuid,
+        "created_at": now_iso(),
+    })
 
     result = generate_category_question(
         AdapterRequest(
@@ -337,7 +363,8 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
         ),
         provider=provider,
     )
-    _record_cost(job, kind=kind, slot=slot, result=result, audit_ref=audit_ref)
+    _record_cost(job, kind=kind, slot=slot, result=result, audit_ref=audit_ref,
+                 invocation_uuid=invocation_uuid)
     slot.audit_ref = audit_ref
     slot.attempts = max(slot.attempts, getattr(result, "attempts", slot.attempts))
 

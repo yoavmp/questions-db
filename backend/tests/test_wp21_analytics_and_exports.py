@@ -220,18 +220,23 @@ def test_full_export_schema_order_and_missing_value_convention(jobs_app, jobs_ro
 
     # openpyxl round-trips a written "" back as None -- verified empirically;
     # either way there is no fabricated id/measurement, just a blank cell.
+    # Strict checks (not a bare `not r[9]`, which a fabricated 0 would also
+    # pass): missing is exactly None/"" -- never 0, never the literal "NaN".
     for r, slot in zip(body, ordered_slots):
         if slot.kind == "llm":
-            assert not r[1]    # מזהה_שאלה missing, never fabricated
-            assert not r[9]    # דיוק missing
-            assert not r[10]   # הבחנה missing
+            assert r[1] in (None, "")    # מזהה_שאלה missing, never fabricated
+            assert r[9] in (None, "")    # דיוק missing
+            assert r[10] in (None, "")   # הבחנה missing
+            for cell in (r[1], r[9], r[10]):
+                assert cell != 0 and cell != "0" and cell != "NaN"
         else:
             assert isinstance(r[1], int) and r[1] == slot.db_id
             if slot.db_id == seeded_id:
                 assert r[9] == "[80.0, 90.0]"   # exact legacy multi-value convention
                 assert r[10] == "[0.4]"
             else:
-                assert not r[9] and not r[10]  # this DB row has no history either
+                assert r[9] in (None, "") and r[10] in (None, "")  # this DB row has no history either
+                assert r[9] != 0 and r[10] != 0
 
 
 def test_full_export_never_inserts_into_the_db(jobs_app, jobs_root, llm_ready):

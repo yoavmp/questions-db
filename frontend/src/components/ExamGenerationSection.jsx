@@ -143,8 +143,12 @@ function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating }) {
         const retryable =
           slot.kind === 'llm' &&
           ['failed', 'interrupted', 'cost_ceiling'].includes(slot.status)
-        // ledger-derived, not the mutable (rollback-prone) slot counters (§6)
-        const { attempts, retries } = slotAttemptCounts(telemetry, slot.slot_id)
+        // ledger-derived, not the mutable (rollback-prone) slot counters (§6);
+        // retries/replacements/failedAttempts stay separate, never folded (WP21R §2)
+        const { attempts, retries, replacements, failedAttempts } = slotAttemptCounts(
+          telemetry,
+          slot.slot_id,
+        )
         return (
           <span
             key={slot.slot_id}
@@ -166,7 +170,9 @@ function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating }) {
             {attempts > 0 && (
               <span className="text-gray-500">
                 (ניסיונות: {attempts}
-                {retries > 0 ? ` · חזרות: ${retries}` : ''})
+                {retries > 0 ? ` · ניסיונות חוזרים לאחר כשל: ${retries}` : ''}
+                {replacements > 0 ? ` · החלפות LLM: ${replacements}` : ''}
+                {failedAttempts > 0 ? ` · נכשלו: ${failedAttempts}` : ''})
               </span>
             )}
             {slot.safe_error && (
@@ -200,8 +206,12 @@ function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onRep
   const answers = [q.answer1, q.answer2, q.answer3, q.answer4]
   // ledger-derived, not q.generation_meta's mutable slot counters (§6) -- a
   // failed paid replace_llm rolls those back to their pre-attempt value, but
-  // the ledger (and this) still shows it.
-  const { attempts, retries } = slotAttemptCountsByInstance(telemetry, q.instance_id)
+  // the ledger (and this) still shows it. retries/replacements/failedAttempts
+  // stay separate, never folded into one figure (WP21R §2).
+  const { attempts, retries, replacements, failedAttempts } = slotAttemptCountsByInstance(
+    telemetry,
+    q.instance_id,
+  )
   return (
     <Card className="p-4 hebrew-text">
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -261,7 +271,9 @@ function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onRep
         {attempts > 0 && (
           <span className="text-xs text-gray-500">
             ניסיונות: {attempts}
-            {retries > 0 ? ` · חזרות: ${retries}` : ''}
+            {retries > 0 ? ` · ניסיונות חוזרים לאחר כשל: ${retries}` : ''}
+            {replacements > 0 ? ` · החלפות LLM: ${replacements}` : ''}
+            {failedAttempts > 0 ? ` · נכשלו: ${failedAttempts}` : ''}
             {q.generation_meta?.cost_usd
               ? `, עלות: ${formatUSD(q.generation_meta.cost_usd)}`
               : ''}
@@ -725,8 +737,8 @@ export default function ExamGenerationSection() {
             <div className="hebrew-text text-sm space-y-1" data-testid="telemetry">
               <p>
                 סה"כ ניסיונות: {tel.totals.attempts}, מתוכם נכשלו וחויבו:{' '}
-                {tel.totals.charged_failed_attempts}, ניסיונות חוזרים:{' '}
-                {tel.totals.retries}, החלפות בבינה: {tel.totals.replacements},
+                {tel.totals.charged_failed_attempts}, ניסיונות חוזרים לאחר כשל:{' '}
+                {tel.totals.retries}, החלפות LLM: {tel.totals.replacements},
                 רשומות בפנקס: {tel.totals.ledger_entries}
               </p>
               {Object.entries(tel.by_category).map(([name, c]) => (
