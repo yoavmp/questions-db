@@ -9,6 +9,7 @@ Routes (all under ``/api``)::
     POST   /exam-jobs/<job_id>/questions/<iid>/replace-db   -> swap in a DB question (any accepted slot)
     POST   /exam-jobs/<job_id>/questions/<iid>/replace-llm  -> regenerate a question (any accepted slot)
     GET    /exam-jobs/<job_id>/export.xlsx              -> accepted origin=llm questions only
+    GET    /exam-jobs/<job_id>/export-full.xlsx         -> every current question, legacy schema (WP21)
     GET    /exam-jobs/readiness                         -> LLM readiness report
 
 As of WP19 ``replace-db`` takes the same process/file run lock as ``replace-llm``
@@ -150,6 +151,8 @@ def replace_llm(job_id, instance_id):
 
 @exam_jobs_bp.route("/exam-jobs/<job_id>/export.xlsx", methods=["GET"])
 def export_xlsx(job_id):
+    """LLM-only export (unchanged since WP18/19): accepted origin=llm questions,
+    upload-compatible 7-column schema, for later manual database upload."""
     job = store.load(job_id)
     if job is None:
         return _err("job not found", 404)
@@ -162,5 +165,27 @@ def export_xlsx(job_id):
     )
     resp.headers["Content-Disposition"] = (
         f'attachment; filename="generated_questions_{job_id[:8]}.xlsx"'
+    )
+    return resp
+
+
+@exam_jobs_bp.route("/exam-jobs/<job_id>/export-full.xlsx", methods=["GET"])
+def export_full_xlsx(job_id):
+    """Full current-exam export (WP21): every current DB + LLM question,
+    complete legacy 12-column schema (see service.FULL_EXPORT_HEADERS). A
+    distinct route/label from ``export.xlsx`` on purpose -- one label never
+    means two things (WP21 §5)."""
+    job = store.load(job_id)
+    if job is None:
+        return _err("job not found", 404)
+    data = service.export_full_xlsx(job)
+    from flask import make_response
+
+    resp = make_response(data)
+    resp.headers["Content-Type"] = (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    resp.headers["Content-Disposition"] = (
+        f'attachment; filename="full_exam_{job_id[:8]}.xlsx"'
     )
     return resp

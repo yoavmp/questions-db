@@ -30,6 +30,10 @@ from typing import Optional
 from src.jobs.model import Job
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+#: one top-level invocation's audit-directory name: "<kind>_<4-digit seq>",
+#: e.g. "initial_0001", "retry_0002", "replace_llm_0003" -- see
+#: ``invocation_audit_dir`` (WP21 §7).
+_INVOCATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
 # process-wide guard around job.json writes (atomic replace still protects
 # cross-process, this just avoids interleaved temp files in one process)
@@ -69,6 +73,29 @@ def slot_audit_dir(job_id: str, slot_id: str) -> Path:
     if not _UUID_RE.match(slot_id or ""):
         raise ValueError(f"invalid slot id {slot_id!r}")
     d = job_dir(job_id) / "slots" / slot_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def invocation_audit_dir(job_id: str, slot_id: str, invocation_id: str) -> Path:
+    """A fresh, never-reused audit directory for ONE top-level LLM invocation
+    (initial run / retry / replace_llm) on one slot (WP21 §7).
+
+    Earlier code passed the same ``slot_audit_dir`` to every invocation on a
+    slot; the generator's own internal ``attempt_01``/``attempt_02`` counter
+    then restarted at 1 each time, so a later invocation silently overwrote an
+    earlier one's evidence. Every invocation now gets its own subdirectory
+    named ``<kind>_<seq>`` (``seq`` = that invocation's eventual
+    ``cost_ledger`` position) -- collision-resistant, monotonic, and never
+    reused, so nothing written under an earlier invocation is ever touched
+    again. ``invocation_id`` must be a safe token (letters/digits/underscore
+    only) -- this is also the relative audit reference stored on the
+    matching ledger entry and slot, safe to surface in the UI (no absolute
+    path, no prompt/response content).
+    """
+    if not _INVOCATION_RE.match(invocation_id or ""):
+        raise ValueError(f"invalid invocation id {invocation_id!r}")
+    d = slot_audit_dir(job_id, slot_id) / invocation_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 

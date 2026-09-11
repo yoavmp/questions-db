@@ -14,6 +14,7 @@ vi.mock('@/lib/examApi.js', () => ({
   replaceFromDb: vi.fn(),
   replaceViaLlm: vi.fn(),
   downloadGeneratedXlsx: vi.fn(),
+  downloadFullExamXlsx: vi.fn(),
   downloadExamDocx: vi.fn(),
   saveBlob: vi.fn(),
 }))
@@ -38,7 +39,7 @@ const CATEGORIES = [
   { name: 'היסטולוגיה', question_count: 9 },
 ]
 
-function dbQuestion(n, iid) {
+function dbQuestion(n, iid, analytics = {}) {
   return {
     number: n,
     question: `שאלת מאגר ${n}`,
@@ -52,6 +53,10 @@ function dbQuestion(n, iid) {
     id: 100 + n,
     category: 'מבוא',
     categories: ['מבוא'],
+    accuracy: analytics.accuracy ?? null,
+    distinction: analytics.distinction ?? null,
+    accuracy_list: analytics.accuracy_list ?? [],
+    distinction_list: analytics.distinction_list ?? [],
   }
 }
 function llmQuestion(n, iid) {
@@ -109,7 +114,10 @@ function makeView(over = {}) {
       by_category: {
         מבוא: { attempts: 1, failed_attempts: 0, charged_failed_attempts: 0, retries: 0, replacements: 0, accepted: 1, cost_usd: '0.34', entries: 1 },
       },
-      by_slot: {},
+      by_slot: {
+        's-db': { instance_id: 'iid-db', attempts: 0, retries: 0, replacements: 0, kind: 'database', category: 'מבוא', number: 1, outcomes: [] },
+        's-llm': { instance_id: 'iid-llm', attempts: 1, retries: 0, replacements: 0, kind: 'llm', category: 'מבוא', number: 2, outcomes: ['accepted'] },
+      },
       totals: { attempts: 1, failed_attempts: 0, charged_failed_attempts: 0, retries: 0, replacements: 0, accepted: 1, cost_usd: '0.34', entries: 1, ledger_entries: 1 },
     },
     ...over,
@@ -530,12 +538,22 @@ describe('results and replacements', () => {
     expect(screen.getByText(/מחירון ישן/)).toBeInTheDocument()
   })
 
-  it('downloads the generated-question Excel through the job export endpoint', async () => {
+  it('downloads the LLM-only Excel through the job export endpoint', async () => {
     const user = userEvent.setup()
     await renderResumed()
     api.downloadGeneratedXlsx.mockResolvedValue(new Blob(['x']))
-    await user.click(screen.getByRole('button', { name: 'ייצא שאלות שנוצרו (Excel)' }))
+    await user.click(screen.getByRole('button', { name: 'ייצוא שאלות בינה בלבד (Excel)' }))
     expect(api.downloadGeneratedXlsx).toHaveBeenCalledWith('job-1')
+    await waitFor(() => expect(api.saveBlob).toHaveBeenCalled())
+  })
+
+  it('downloads the full-exam Excel through its own distinct endpoint (§5)', async () => {
+    const user = userEvent.setup()
+    await renderResumed()
+    api.downloadFullExamXlsx.mockResolvedValue(new Blob(['x']))
+    await user.click(screen.getByRole('button', { name: 'ייצוא מבחן מלא (Excel)' }))
+    expect(api.downloadFullExamXlsx).toHaveBeenCalledWith('job-1')
+    expect(api.downloadGeneratedXlsx).not.toHaveBeenCalled()
     await waitFor(() => expect(api.saveBlob).toHaveBeenCalled())
   })
 
@@ -548,5 +566,150 @@ describe('results and replacements', () => {
     expect(includeAnswers).toBe(false)
     expect(questionsArg.map((q) => q.number)).toEqual([1, 2]) // canonical order
     await waitFor(() => expect(api.saveBlob).toHaveBeenCalled())
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// WP21: restored grouped presentation, per-question/overall analytics, and
+// ledger-derived (not mutable-slot-derived) attempt/retry counts.
+// --------------------------------------------------------------------------- //
+describe('WP21 - category headings, analytics, ledger-derived counts', () => {
+  async function renderResumed(view) {
+    window.localStorage.setItem('examJob.activeId', view.job_id || 'job-1')
+    api.fetchJob.mockResolvedValue(view)
+    render(<ExamGenerationSection />)
+    await waitFor(() =>
+      expect(screen.getByTestId('job-status')).toHaveTextContent(STATUS_LABEL[view.status]),
+    )
+    if ((view.questions || []).length) {
+      await screen.findByText(`${view.questions[0].number}. ${view.questions[0].question}`)
+    }
+  }
+
+  it('renders one heading per category, in canonical order, never repeated within a group (§2)', async () => {
+    const view = makeView({
+      categories: {
+        מבוא: {
+          order_index: 0, total: 2, database: 1, llm: 1, accepted: 2, failed: 0, pending: 0,
+          slots: [
+            { slot_id: 's-db', instance_id: 'iid-db', kind: 'database', number: 1, status: 'accepted', attempts: 0, retries: 0, safe_error: null },
+            { slot_id: 's-llm', instance_id: 'iid-llm', kind: 'llm', number: 2, status: 'accepted', attempts: 1, retries: 0, safe_error: null },
+          ],
+        },
+        'גרעיני הבסיס': {
+          order_index: 6, total: 2, database: 2, llm: 0, accepted: 2, failed: 0, pending: 0,
+          slots: [
+            { slot_id: 's-db2', instance_id: 'iid-db2', kind: 'database', number: 3, status: 'accepted', attempts: 0, retries: 0, safe_error: null },
+            { slot_id: 's-db3', instance_id: 'iid-db3', kind: 'database', number: 4, status: 'accepted', attempts: 0, retries: 0, safe_error: null },
+          ],
+        },
+      },
+      questions: [
+        dbQuestion(1, 'iid-db'),
+        llmQuestion(2, 'iid-llm'),
+        { ...dbQuestion(3, 'iid-db2'), category: 'גרעיני הבסיס', categories: ['גרעיני הבסיס'] },
+        { ...dbQuestion(4, 'iid-db3'), category: 'גרעיני הבסיס', categories: ['גרעיני הבסיס'] },
+      ],
+    })
+    await renderResumed(view)
+    const headings = screen.getAllByRole('heading', { level: 5 })
+    expect(headings.map((h) => h.textContent)).toEqual(['מבוא', 'גרעיני הבסיס']) // once each, canonical order
+  })
+
+  it('shows every historical value when a DB question has several, and N/A when a question has none (§3)', async () => {
+    const view = makeView({
+      questions: [
+        dbQuestion(1, 'iid-db', { accuracy: 85, distinction: 0.4, accuracy_list: [80, 90], distinction_list: [0.4] }),
+        llmQuestion(2, 'iid-llm'),
+      ],
+    })
+    await renderResumed(view)
+    const dbCard = screen.getByText('1. שאלת מאגר 1').closest('div.p-4')
+    expect(within(dbCard).getByText(/דיוק:\s*80%, 90%/)).toBeInTheDocument()
+    expect(within(dbCard).getByText(/הבחנה:\s*0\.4/)).toBeInTheDocument()
+    const llmCard = screen.getByText('2. שאלת בינה 2').closest('div.p-4')
+    expect(within(llmCard).getByText(/דיוק:\s*N\/A/)).toBeInTheDocument()
+    expect(within(llmCard).getByText(/הבחנה:\s*N\/A/)).toBeInTheDocument()
+  })
+
+  it('computes overall mean accuracy and the distinction-threshold count/proportion, default threshold 0.3 (§4)', async () => {
+    const view = makeView({
+      questions: [
+        dbQuestion(1, 'iid-db', { accuracy: 80, distinction: 0.5, accuracy_list: [80], distinction_list: [0.5] }),
+        llmQuestion(2, 'iid-llm'), // missing -- excluded, not zero
+      ],
+    })
+    await renderResumed(view)
+    const stats = screen.getByTestId('overall-analytics')
+    expect(stats).toHaveTextContent('דיוק ממוצע: 80.0%')
+    expect(stats).toHaveTextContent('שאלות עם הבחנה גבוהה מ-0.3: 1 מתוך 1')
+  })
+
+  it('recomputes the distinction count when the threshold slider moves', async () => {
+    const view = makeView({
+      questions: [
+        dbQuestion(1, 'iid-db', { distinction: 0.5, distinction_list: [0.5] }),
+        { ...dbQuestion(2, 'iid-db2'), distinction: 0.2, distinction_list: [0.2] },
+      ],
+    })
+    await renderResumed(view)
+    const stats = screen.getByTestId('overall-analytics')
+    expect(stats).toHaveTextContent('שאלות עם הבחנה גבוהה מ-0.3: 1 מתוך 2')
+    fireEvent.change(screen.getByLabelText('סף הבחנה:'), { target: { value: '0.1' } })
+    expect(stats).toHaveTextContent('שאלות עם הבחנה גבוהה מ-0.1: 2 מתוך 2')
+  })
+
+  it('shows N/A and 0 מתוך 0 when every question is missing analytics -- never 0% or a divide-by-zero (§4)', async () => {
+    const view = makeView({
+      questions: [llmQuestion(1, 'iid-llm'), { ...llmQuestion(2, 'iid-llm2'), instance_id: 'iid-llm2' }],
+    })
+    await renderResumed(view)
+    const stats = screen.getByTestId('overall-analytics')
+    expect(stats).toHaveTextContent('דיוק ממוצע: N/A')
+    expect(stats).toHaveTextContent('0 מתוך 0')
+  })
+
+  it('per-slot progress chips use ledger-derived ניסיונות/חזרות labels, not נ=/ח= abbreviations', async () => {
+    await renderResumed(makeView({ status: 'partial' }))
+    const progressCard = screen.getByText('התקדמות לפי נושא').closest('div.rounded-lg')
+    expect(within(progressCard).getByText(/ניסיונות: 1/)).toBeInTheDocument()
+    expect(screen.queryByText(/נ=/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/ח=/)).not.toBeInTheDocument()
+  })
+
+  it('keeps a failed paid replace_llm visible via ledger-derived counts even though the mutable slot/generation_meta counters rolled back (§6)', async () => {
+    const view = makeView({
+      questions: [
+        dbQuestion(1, 'iid-db'),
+        // generation_meta reflects only the original accepted attempt -- as it
+        // is after WP18R's failure rollback restores attempts/retries
+        { ...llmQuestion(2, 'iid-llm'), generation_meta: { attempts: 1, retries_by_slot: 0, cost_usd: '0.05', outcome: 'accepted' } },
+      ],
+      attempt_telemetry: {
+        by_category: {
+          מבוא: { attempts: 2, failed_attempts: 1, charged_failed_attempts: 1, retries: 0, replacements: 1, accepted: 1, cost_usd: '0.09', entries: 2 },
+        },
+        by_slot: {
+          's-db': { instance_id: 'iid-db', attempts: 0, retries: 0, replacements: 0, kind: 'database', category: 'מבוא', number: 1, outcomes: [] },
+          's-llm': { instance_id: 'iid-llm', attempts: 2, retries: 0, replacements: 1, kind: 'llm', category: 'מבוא', number: 2, outcomes: ['accepted', 'question_rejected'] },
+        },
+        totals: { attempts: 2, failed_attempts: 1, charged_failed_attempts: 1, retries: 0, replacements: 1, accepted: 1, cost_usd: '0.09', entries: 2, ledger_entries: 2 },
+      },
+    })
+    await renderResumed(view)
+    const llmCard = screen.getByText('2. שאלת בינה 2').closest('div.p-4')
+    expect(within(llmCard).getByText(/ניסיונות: 2/)).toBeInTheDocument()
+    expect(within(llmCard).getByText(/חזרות: 1/)).toBeInTheDocument()
+  })
+
+  it('never shows category_history and never a current DB/LLM aggregate alongside the new sections', async () => {
+    await renderResumed(
+      makeView({
+        category_history: { מבוא: [{ number: 2, question: 'היסטוריה סמנטית פנימית', answer1: 'א', answer2: 'ב', answer3: 'ג', answer4: 'ד', correct_answer: 1 }] },
+      }),
+    )
+    expect(screen.queryByText(/היסטוריה סמנטית פנימית/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('current-composition')).not.toBeInTheDocument()
+    expect(screen.queryByText(/כרגע.*מהמאגר/)).not.toBeInTheDocument()
   })
 })

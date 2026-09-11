@@ -5,17 +5,22 @@ import {
   deriveFromParts,
   deriveFromTotal,
   emptyRow,
+  formatMeasure,
+  groupByCategory,
   isPollingStatus,
   isTerminalStatus,
   llmBlockedReasons,
   loadActiveJobId,
   orderQuestions,
+  overallAnalytics,
   parseCeiling,
   parseCount,
   pricingWarnings,
   retryableSlots,
   rowNumbers,
   saveActiveJobId,
+  slotAttemptCounts,
+  slotAttemptCountsByInstance,
   startBlockers,
   stripJobMetadata,
   SEVEN_PUBLIC_FIELDS,
@@ -305,5 +310,96 @@ describe('active-job persistence', () => {
     syncJobIdToUrl('from-url')
     expect(window.location.search).toContain('examJob=from-url')
     expect(loadActiveJobId()).toBe('from-url')
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// WP21: category grouping, per-question/overall analytics, ledger-derived counts
+// --------------------------------------------------------------------------- //
+describe('groupByCategory', () => {
+  it('groups consecutive same-category questions into one run each, order preserved', () => {
+    const qs = [
+      { category: 'א', number: 1 }, { category: 'א', number: 2 },
+      { category: 'ב', number: 3 },
+    ]
+    expect(groupByCategory(qs)).toEqual([
+      { category: 'א', questions: [qs[0], qs[1]] },
+      { category: 'ב', questions: [qs[2]] },
+    ])
+  })
+
+  it('starts a new group if the same category reappears non-consecutively', () => {
+    const qs = [{ category: 'א', number: 1 }, { category: 'ב', number: 2 }, { category: 'א', number: 3 }]
+    expect(groupByCategory(qs).map((g) => g.category)).toEqual(['א', 'ב', 'א'])
+  })
+
+  it('empty input -> empty output', () => {
+    expect(groupByCategory([])).toEqual([])
+    expect(groupByCategory(undefined)).toEqual([])
+  })
+})
+
+describe('formatMeasure (recovered legacy missing/multi-value convention)', () => {
+  it('joins every historical value when there is more than one', () => {
+    expect(formatMeasure([80, 90], 85, { percent: true })).toBe('80%, 90%')
+    expect(formatMeasure([0.4, 0.6], 0.5)).toBe('0.4, 0.6')
+  })
+
+  it('falls back to the single average when the list has exactly one value', () => {
+    expect(formatMeasure([80], 80, { percent: true })).toBe('80%')
+  })
+
+  it('is N/A -- never the literal text "NaN", never a fabricated 0 -- when there is no data', () => {
+    expect(formatMeasure([], null, { percent: true })).toBe('N/A')
+    expect(formatMeasure(undefined, undefined)).toBe('N/A')
+  })
+})
+
+describe('overallAnalytics (recovered legacy formula)', () => {
+  it('means each question\'s own average accuracy, ignoring questions with none', () => {
+    const qs = [{ accuracy: 80 }, { accuracy: 90 }, { accuracy: null }]
+    expect(overallAnalytics(qs, 0.3).avgAccuracy).toBe(85)
+  })
+
+  it('counts distinction STRICTLY greater than the threshold, over only non-missing values', () => {
+    const qs = [{ distinction: 0.5 }, { distinction: 0.3 }, { distinction: null }]
+    const s = overallAnalytics(qs, 0.3)
+    expect(s.highDistinctionCount).toBe(1) // 0.3 is NOT > 0.3
+    expect(s.totalValidDistinction).toBe(2)
+  })
+
+  it('all-missing is null (never 0, never a divide-by-zero)', () => {
+    const s = overallAnalytics([{ accuracy: null, distinction: null }], 0.3)
+    expect(s.avgAccuracy).toBeNull()
+    expect(s.highDistinctionCount).toBe(0)
+    expect(s.totalValidDistinction).toBe(0)
+  })
+
+  it('empty exam is also null/0, not an error', () => {
+    const s = overallAnalytics([], 0.3)
+    expect(s.avgAccuracy).toBeNull()
+    expect(s.totalValidDistinction).toBe(0)
+  })
+})
+
+describe('slotAttemptCounts / slotAttemptCountsByInstance (ledger-derived, §6)', () => {
+  const telemetry = {
+    by_slot: {
+      's-1': { instance_id: 'iid-1', attempts: 2, retries: 0, replacements: 1 },
+    },
+  }
+
+  it('folds retries + replacements into one "חזרות" figure', () => {
+    expect(slotAttemptCounts(telemetry, 's-1')).toEqual({ attempts: 2, retries: 1 })
+  })
+
+  it('looks a slot up by its stable instance_id, not slot_id', () => {
+    expect(slotAttemptCountsByInstance(telemetry, 'iid-1')).toEqual({ attempts: 2, retries: 1 })
+  })
+
+  it('an unknown slot/instance is 0/0, not a crash', () => {
+    expect(slotAttemptCounts(telemetry, 'missing')).toEqual({ attempts: 0, retries: 0 })
+    expect(slotAttemptCountsByInstance(telemetry, 'missing')).toEqual({ attempts: 0, retries: 0 })
+    expect(slotAttemptCounts(null, 's-1')).toEqual({ attempts: 0, retries: 0 })
   })
 })

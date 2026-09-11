@@ -212,6 +212,97 @@ export function stripJobMetadata(questions) {
   })
 }
 
+// --- category grouping (WP21 §2) -------------------------------------
+
+// `questions` must already be in canonical/global-number order (orderQuestions
+// output). Groups consecutive same-category runs so a heading renders once
+// per group and is never repeated within it -- global numbering is always
+// contiguous per category (WP17 category_order + number_base), so a
+// consecutive-run grouping is equivalent to (and simpler than) the legacy
+// screen's object-key grouping.
+export function groupByCategory(questions) {
+  const groups = []
+  for (const q of questions || []) {
+    const last = groups[groups.length - 1]
+    if (last && last.category === q.category) {
+      last.questions.push(q)
+    } else {
+      groups.push({ category: q.category, questions: [q] })
+    }
+  }
+  return groups
+}
+
+// --- per-question analytics display (WP21 §3, recovered legacy contract) --
+
+// Exact legacy convention (pre-WP19 QuestionCard): every raw historical value
+// when there is more than one recorded exam use it appeared in; the single
+// per-question average as a fallback; 'N/A' (never the bare word "NaN", never
+// a fabricated 0) when there is no data at all. `percent` adds the historical
+// '%' suffix used for accuracy but not distinction.
+export function formatMeasure(list, avg, { percent = false } = {}) {
+  const fmt = (v) => (percent ? `${v}%` : `${v}`)
+  if (Array.isArray(list) && list.length > 0) return list.map(fmt).join(', ')
+  if (avg != null) return fmt(avg)
+  return 'N/A'
+}
+
+// --- overall exam analytics (WP21 §4, recovered legacy contract) ----------
+
+export const DEFAULT_DISTINCTION_THRESHOLD = 0.3
+
+// Legacy formula verbatim (git show 4cd86d1:frontend/src/App.jsx, the deleted
+// TestGenerationSection): mean of each question's OWN average accuracy
+// (ignoring questions with no accuracy at all); count/total of questions
+// whose OWN average distinction is STRICTLY greater than `threshold`, among
+// only the questions that have a distinction value at all. All-missing is
+// `null` (rendered 'N/A' at presentation) -- never 0, never a divide-by-zero.
+export function overallAnalytics(questions, threshold) {
+  const accuracyValues = (questions || [])
+    .map((q) => parseFloat(q.accuracy))
+    .filter((acc) => !Number.isNaN(acc) && acc != null)
+  const avgAccuracy =
+    accuracyValues.length > 0
+      ? accuracyValues.reduce((sum, acc) => sum + acc, 0) / accuracyValues.length
+      : null
+  const validDistinction = (questions || [])
+    .map((q) => parseFloat(q.distinction))
+    .filter((d) => !Number.isNaN(d) && d != null)
+  const highDistinctionCount = validDistinction.filter((d) => d > threshold).length
+  return {
+    avgAccuracy,
+    highDistinctionCount,
+    totalValidDistinction: validDistinction.length,
+  }
+}
+
+// --- ledger-derived attempt/retry counts (WP21 §6) ------------------------
+
+// Question-card counts must come from the immutable cost_ledger (via
+// attempt_telemetry.by_slot), not the mutable slot.attempts/slot.retries --
+// a failed paid replace_llm rolls the SLOT back to its pre-attempt state
+// (WP18R), so those mutable counters silently lose it; the ledger never does.
+// "חזרות" (retries) folds both job-level retries AND LLM replacement
+// attempts on that slot -- either kind of "try again" the owner asked for.
+export function slotAttemptCounts(telemetry, slotId) {
+  const b = telemetry?.by_slot?.[slotId]
+  if (!b) return { attempts: 0, retries: 0 }
+  return { attempts: b.attempts || 0, retries: (b.retries || 0) + (b.replacements || 0) }
+}
+
+// A result question DTO only carries `instance_id` (stable across
+// replacements), not the internal `slot_id` the ledger is keyed by -- look it
+// up by matching `by_slot[*].instance_id` (also stable) instead.
+export function slotAttemptCountsByInstance(telemetry, instanceId) {
+  const bySlot = telemetry?.by_slot || {}
+  for (const b of Object.values(bySlot)) {
+    if (b.instance_id === instanceId) {
+      return { attempts: b.attempts || 0, retries: (b.retries || 0) + (b.replacements || 0) }
+    }
+  }
+  return { attempts: 0, retries: 0 }
+}
+
 export function isTerminalStatus(status) {
   return ['completed', 'partial', 'interrupted', 'cost_ceiling', 'failed'].includes(status)
 }

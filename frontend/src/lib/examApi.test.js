@@ -99,13 +99,22 @@ describe('downloadExamDocx', () => {
   })
 })
 
-describe('downloadGeneratedXlsx', () => {
-  it('GETs the job export endpoint and returns a Blob', async () => {
+describe('downloadGeneratedXlsx / downloadFullExamXlsx (two distinct routes, §5)', () => {
+  it('downloadGeneratedXlsx GETs the LLM-only export endpoint and returns a Blob', async () => {
     fetch.mockReturnValueOnce(
       Promise.resolve({ ok: true, status: 200, blob: () => Promise.resolve(new Blob(['x'])) }),
     )
     const blob = await api.downloadGeneratedXlsx('j1')
     expect(blob).toBeInstanceOf(Blob)
     expect(fetch.mock.calls[0][0]).toMatch(/\/exam-jobs\/j1\/export\.xlsx$/)
+  })
+
+  it('downloadFullExamXlsx GETs its own distinct full-export endpoint', async () => {
+    fetch.mockReturnValueOnce(
+      Promise.resolve({ ok: true, status: 200, blob: () => Promise.resolve(new Blob(['x'])) }),
+    )
+    const blob = await api.downloadFullExamXlsx('j1')
+    expect(blob).toBeInstanceOf(Blob)
+    expect(fetch.mock.calls[0][0]).toMatch(/\/exam-jobs\/j1\/export-full\.xlsx$/)
   })
 })

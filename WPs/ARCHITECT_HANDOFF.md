@@ -3,21 +3,21 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-11 · **Latest completed WP:** WP20 + its owner-approved follow-up (live
-end-to-end validation, `category_history` hidden from the exam UI, and a corrected
-backend-terminal cost line).
-**Next:** none scheduled. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end and has now been
-validated against a real local backend + real OpenAI generation (one small mixed job, $0.087 of a
-$1.00 authorized ceiling). The legacy synchronous `/api/test/generate` + `/api/test/replace-question`
-endpoints are **still present** (nothing on the current screen calls them) and may be retired by a
-later WP.
+**Updated:** 2026-09-11 · **Latest completed WP:** WP21 (restored grouped exam presentation,
+per-question/overall analytics, a full Excel export alongside the LLM-only one, ledger-derived
+attempt/retry display, and audit-overwrite prevention).
+**Next:** none scheduled. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end, has been
+validated against a real local backend + real OpenAI generation (WP20: one small mixed job, $0.087
+of a $1.00 authorized ceiling), and now also carries the analytics/export/audit surface WP21
+restored. The legacy synchronous `/api/test/generate` + `/api/test/replace-question` endpoints are
+**still present** (nothing on the current screen calls them) and may be retired by a later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP20 follow-up: print cumulative LLM cost` commit — `git rev-parse HEAD`; parent is the `WP20: validate live integrated exam flow` commit)* | branch `main`; **not pushed** |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, **fully clean** (the stray `.DS_Store` was deleted in the follow-up), **do not commit/push here** |
+| Outer `questions-db` | `.` | *(set by the `WP21: restore exam analytics and complete exports` commit — `git rev-parse HEAD`; parent is the `WP20 follow-up: print cumulative LLM cost` commit)* | branch `main`; **not pushed** |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
 contains `ea59cd8` (WP17GR). Pre-submodule snapshot preserved at
@@ -67,7 +67,8 @@ LLM readiness reports it missing otherwise).
 | Ledger-derived attempt/retry telemetry (WP19) | `backend/src/jobs/service.py::ledger_telemetry` → `result_view()["attempt_telemetry"]` |
 | Job-API exam screen (WP19) | `frontend/src/components/ExamGenerationSection.jsx` + `frontend/src/lib/examGen.js` (pure) + `examApi.js` (client) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py` |
+| Per-question/DB analytics snapshot, full export, audit invocation dirs (WP21) | `backend/src/jobs/model.py::missing_analytics`, `service.py::_db_analytics/export_full_xlsx`, `store.py::invocation_audit_dir` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py` |
 | Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
@@ -121,6 +122,30 @@ LLM readiness reports it missing otherwise).
   acceptance *and* on its charged failure; **no** line (and no cost movement) for
   `replace_from_db`; and the printed `remaining=$` matches `ceiling − accumulated` exactly. Full
   detail in `WPs/WP20_ARCHITECT_REPORT.md` §8.
+- **WP21 — restored analytics/exports, and two fixes the WP20 failure-analysis task surfaced.**
+  `Slot.analytics` ({`accuracy`,`distinction`,`accuracy_list`,`distinction_list`}) is now
+  **persisted**, snapshotted at DB selection/replacement time, never re-fetched live (closes a real
+  gap: the old live re-query silently dropped accuracy whenever no app context was available or the
+  row was later edited/deleted) — set by `service._db_analytics`/`_apply_db_origin`, reset to
+  missing by `_apply_llm_origin`, restored on a failed `replace_via_llm` like `question` is. Never
+  reaches `Slot.question` or generator context. The exam screen groups results by category again
+  (one heading per group), shows every historical accuracy/distinction value per question (`'N/A'`
+  when there is none — the legacy convention; **not** the literal text `"NaN"`, contra the brief's
+  phrasing — see `WPs/WP21_ARCHITECT_REPORT.md` §1), and recomputes the legacy mean-accuracy /
+  distinction-threshold stats client-side (threshold slider, default `0.3`, never sent to the
+  backend — matching the legacy architecture exactly). **Fix 1:** `GET …/export-full.xlsx`
+  (`service.export_full_xlsx`) — every current DB+LLM question, the complete 12-column legacy
+  schema — alongside the unchanged 7-column `GET …/export.xlsx` (LLM-only, upload-compatible,
+  verified against the real `upload_excel()` contract, not just assumed). **Fix 2 (the WP20 bug):**
+  question cards and slot chips now read attempt/retry counts from `attempt_telemetry.by_slot`
+  instead of the mutable `slot.attempts/retries` — a failed paid `replace_llm` rolls those back to
+  their pre-attempt value (WP18R), so it was previously **invisible** in the UI even though charged;
+  the ledger-derived label (`ניסיונות: N · חזרות: N`) fixes that. **Fix 3 (the other WP20 bug):**
+  `_generate_one` now writes every top-level LLM call into its **own** invocation directory
+  (`slots/<slot_id>/<kind>_<seq>`, `seq` = that call's own `cost_ledger` position) instead of a
+  shared per-slot directory — a later call can no longer silently overwrite an earlier one's audit
+  evidence; every ledger row carries a safe relative `audit_ref`. Full detail in
+  `WPs/WP21_ARCHITECT_REPORT.md`.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,
@@ -140,11 +165,18 @@ LLM readiness reports it missing otherwise).
    suite is green (886→900 collected, 726 passed, 174 Data/font skips) and the
    targeted production tests pass network-blocked from this repo's env.
 
-**Open items (post-WP20 follow-up)**
+**Open items (post-WP21)**
 
+- Overall analytics (mean accuracy, distinction-threshold count) is deliberately **frontend-only**
+  and unpersisted — matches the legacy architecture exactly, not an oversight. If it's ever wanted
+  server-side, it needs a new WP.
+- A generated (LLM-origin) row's "missing id" in the full export has no literal legacy precedent
+  (history never had an idless question) — it reuses the accuracy/distinction blank-cell convention.
+  Reasonable and documented, not fabricated, but flagged as an extension rather than a recovery.
 - No live failure/retry/rollback was exercised in WP20 (by design, to stay inside the one
   authorized paid job) — that surface keeps relying on the offline fake-provider suites
-  (`test_wp18r_cross_source_replacements.py`, `test_wp19_frontend_contract.py`).
+  (`test_wp18r_cross_source_replacements.py`, `test_wp19_frontend_contract.py`,
+  `test_wp21_analytics_and_exports.py`).
 - No browser-automation tool (Playwright/Puppeteer/Cypress) is installed in this environment; a
   future live UI validation would need one added first if a literal click-through is required.
 

@@ -12,18 +12,24 @@ import { Input } from '@/components/ui/input.jsx'
 
 import {
   DEFAULT_COST_CEILING_USD,
+  DEFAULT_DISTINCTION_THRESHOLD,
   applyRowEdit,
   buildCreatePayload,
   emptyRow,
+  formatMeasure,
   formatUSD,
+  groupByCategory,
   isPollingStatus,
   loadActiveJobId,
   orderQuestions,
+  overallAnalytics,
   parseCeiling,
   pricingWarnings,
   retryableSlots,
   rowNumbers,
   saveActiveJobId,
+  slotAttemptCounts,
+  slotAttemptCountsByInstance,
   startBlockers,
   syncJobIdToUrl,
   validateRow,
@@ -130,13 +136,15 @@ function CategoryInputs({ categories, rows, onEdit }) {
 // --------------------------------------------------------------------------- //
 // progress
 // --------------------------------------------------------------------------- //
-function SlotChips({ slots, jobId, onRetry, retryingSlotId, mutating }) {
+function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating }) {
   return (
     <div className="flex flex-wrap gap-2">
       {slots.map((slot) => {
         const retryable =
           slot.kind === 'llm' &&
           ['failed', 'interrupted', 'cost_ceiling'].includes(slot.status)
+        // ledger-derived, not the mutable (rollback-prone) slot counters (§6)
+        const { attempts, retries } = slotAttemptCounts(telemetry, slot.slot_id)
         return (
           <span
             key={slot.slot_id}
@@ -155,10 +163,10 @@ function SlotChips({ slots, jobId, onRetry, retryingSlotId, mutating }) {
             >
               {SLOT_STATUS_LABEL[slot.status] || slot.status}
             </span>
-            {(slot.attempts > 0 || slot.retries > 0) && (
+            {attempts > 0 && (
               <span className="text-gray-500">
-                (נ={slot.attempts}
-                {slot.retries > 0 ? `, ח=${slot.retries}` : ''})
+                (ניסיונות: {attempts}
+                {retries > 0 ? ` · חזרות: ${retries}` : ''})
               </span>
             )}
             {slot.safe_error && (
@@ -187,9 +195,13 @@ function SlotChips({ slots, jobId, onRetry, retryingSlotId, mutating }) {
 // --------------------------------------------------------------------------- //
 // result question
 // --------------------------------------------------------------------------- //
-function ResultQuestion({ q, disabled, isMutating, onReplaceDb, onReplaceLlm }) {
+function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onReplaceLlm }) {
   const [showAnswer, setShowAnswer] = useState(false)
   const answers = [q.answer1, q.answer2, q.answer3, q.answer4]
+  // ledger-derived, not q.generation_meta's mutable slot counters (§6) -- a
+  // failed paid replace_llm rolls those back to their pre-attempt value, but
+  // the ledger (and this) still shows it.
+  const { attempts, retries } = slotAttemptCountsByInstance(telemetry, q.instance_id)
   return (
     <Card className="p-4 hebrew-text">
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -211,6 +223,13 @@ function ResultQuestion({ q, disabled, isMutating, onReplaceDb, onReplaceLlm }) 
             <span className="font-medium">{i + 1}.</span> {a}
           </div>
         ))}
+      </div>
+      {/* historical accuracy/distinction -- 'N/A' when there is no data at
+          all (LLM origin, or a never-used DB question); every recorded value
+          when the question appeared in more than one exam (§3) */}
+      <div className="mt-2 flex flex-wrap gap-4 text-xs text-gray-500">
+        <span>דיוק: {formatMeasure(q.accuracy_list, q.accuracy, { percent: true })}</span>
+        <span>הבחנה: {formatMeasure(q.distinction_list, q.distinction)}</span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button
@@ -239,13 +258,11 @@ function ResultQuestion({ q, disabled, isMutating, onReplaceDb, onReplaceLlm }) 
         >
           {isMutating ? 'יוצר...' : 'צור שאלה אחרת'}
         </Button>
-        {q.generation_meta && (
+        {attempts > 0 && (
           <span className="text-xs text-gray-500">
-            ניסיונות: {q.generation_meta.attempts}
-            {q.generation_meta.retries_by_slot > 0
-              ? `, חזרות: ${q.generation_meta.retries_by_slot}`
-              : ''}
-            {q.generation_meta.cost_usd
+            ניסיונות: {attempts}
+            {retries > 0 ? ` · חזרות: ${retries}` : ''}
+            {q.generation_meta?.cost_usd
               ? `, עלות: ${formatUSD(q.generation_meta.cost_usd)}`
               : ''}
           </span>
@@ -273,6 +290,7 @@ export default function ExamGenerationSection() {
   const [retryingSlotId, setRetryingSlotId] = useState(null)
   const [newCeiling, setNewCeiling] = useState('')
   const [raisingCeiling, setRaisingCeiling] = useState(false)
+  const [distinctionThreshold, setDistinctionThreshold] = useState(DEFAULT_DISTINCTION_THRESHOLD)
 
   const startingRef = useRef(false)
 
@@ -465,6 +483,15 @@ export default function ExamGenerationSection() {
     }
   }
 
+  const downloadFullXlsx = async () => {
+    try {
+      const blob = await api.downloadFullExamXlsx(jobId)
+      api.saveBlob(blob, `full_exam_${jobId.slice(0, 8)}.xlsx`)
+    } catch (e) {
+      setError(e.message || 'שגיאה בייצוא Excel')
+    }
+  }
+
   // ------------------------------------------------------------------- //
   // render: builder
   // ------------------------------------------------------------------- //
@@ -544,6 +571,11 @@ export default function ExamGenerationSection() {
   const tel = job?.attempt_telemetry
   const retryList = retryableSlots(job || {})
   const anyBusy = !!mutating || !!retryingSlotId || raisingCeiling
+  // recomputed on every render straight from the current question list, so a
+  // failed replacement (which never replaces `job`) leaves it unchanged and a
+  // successful one is reflected immediately (§4)
+  const stats = overallAnalytics(questions, distinctionThreshold)
+  const groups = groupByCategory(questions)
 
   return (
     <div className="space-y-6">
@@ -664,7 +696,7 @@ export default function ExamGenerationSection() {
                 </div>
                 <SlotChips
                   slots={cat.slots || []}
-                  jobId={jobId}
+                  telemetry={tel}
                   onRetry={handleRetry}
                   retryingSlotId={retryingSlotId}
                   mutating={mutating}
@@ -708,13 +740,48 @@ export default function ExamGenerationSection() {
         </Card>
       )}
 
+      {/* overall exam analytics (§4, recovered legacy contract) */}
+      {questions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="hebrew-text">סטטיסטיקות המבחן</CardTitle>
+          </CardHeader>
+          <CardContent className="hebrew-text space-y-2 text-sm" data-testid="overall-analytics">
+            <p>
+              דיוק ממוצע:{' '}
+              {stats.avgAccuracy != null ? `${stats.avgAccuracy.toFixed(1)}%` : 'N/A'}
+            </p>
+            <div className="flex items-center gap-2">
+              <label className="text-sm" htmlFor="distinction-threshold">
+                סף הבחנה:
+              </label>
+              <input
+                id="distinction-threshold"
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={distinctionThreshold}
+                onChange={(e) => setDistinctionThreshold(parseFloat(e.target.value))}
+                className="flex-1"
+              />
+              <span className="text-sm min-w-[3rem]">{distinctionThreshold.toFixed(1)}</span>
+            </div>
+            <p>
+              שאלות עם הבחנה גבוהה מ-{distinctionThreshold.toFixed(1)}:{' '}
+              {stats.highDistinctionCount} מתוך {stats.totalValidDistinction}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* outputs */}
       <Card>
         <CardHeader>
           <CardTitle className="hebrew-text">ייצוא</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
             <Button
               className="hebrew-text"
               disabled={questions.length === 0}
@@ -735,16 +802,26 @@ export default function ExamGenerationSection() {
               className="hebrew-text"
               onClick={downloadXlsx}
             >
-              ייצא שאלות שנוצרו (Excel)
+              ייצוא שאלות בינה בלבד (Excel)
+            </Button>
+            <Button
+              variant="outline"
+              className="hebrew-text"
+              disabled={questions.length === 0}
+              onClick={downloadFullXlsx}
+            >
+              ייצוא מבחן מלא (Excel)
             </Button>
           </div>
           <p className="hebrew-text text-xs text-gray-500 mt-2">
-            שאלות שנוצרו נשמרות במבחן זה בלבד ואינן נוספות למאגר.
+            "שאלות בינה בלבד" - לשימוש חוזר/העלאה עתידית למאגר; "מבחן מלא" - כל
+            השאלות הנוכחיות בסכימה המלאה. שאלות שנוצרו נשמרות במבחן זה בלבד
+            ואינן נוספות למאגר.
           </p>
         </CardContent>
       </Card>
 
-      {/* results */}
+      {/* results, grouped by category (§2) */}
       <Card>
         <CardHeader>
           <CardTitle className="hebrew-text">שאלות המבחן</CardTitle>
@@ -753,7 +830,7 @@ export default function ExamGenerationSection() {
             זמינים בכל שאלה שהתקבלה.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-6">
           {questions.length === 0 ? (
             <p className="hebrew-text text-gray-500">
               {isPollingStatus(status)
@@ -761,15 +838,23 @@ export default function ExamGenerationSection() {
                 : 'לא התקבלו שאלות.'}
             </p>
           ) : (
-            questions.map((q) => (
-              <ResultQuestion
-                key={q.instance_id}
-                q={q}
-                disabled={anyBusy}
-                isMutating={mutating === q.instance_id}
-                onReplaceDb={handleReplaceDb}
-                onReplaceLlm={handleReplaceLlm}
-              />
+            groups.map((group) => (
+              <div key={group.category} className="space-y-4">
+                <h5 className="hebrew-text font-medium text-lg border-b pb-2 text-blue-700">
+                  {group.category}
+                </h5>
+                {group.questions.map((q) => (
+                  <ResultQuestion
+                    key={q.instance_id}
+                    q={q}
+                    telemetry={tel}
+                    disabled={anyBusy}
+                    isMutating={mutating === q.instance_id}
+                    onReplaceDb={handleReplaceDb}
+                    onReplaceLlm={handleReplaceLlm}
+                  />
+                ))}
+              </div>
             ))
           )}
         </CardContent>

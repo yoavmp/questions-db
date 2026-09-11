@@ -88,8 +88,21 @@ export async function replaceViaLlm(jobId, instanceId) {
 }
 
 // --- downloads ----------------------------------------------------
+// Two distinct, unambiguous exports (WP21 §5) -- one route/label per meaning:
+// LLM-only (unchanged since WP18/19, for later manual DB upload) vs. the full
+// current exam (new, complete legacy schema). Never overload one label.
 export async function downloadGeneratedXlsx(jobId) {
   const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/export.xlsx`)
+  if (!resp.ok) {
+    const err = new Error(`HTTP ${resp.status}`)
+    err.status = resp.status
+    throw err
+  }
+  return resp.blob()
+}
+
+export async function downloadFullExamXlsx(jobId) {
+  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/export-full.xlsx`)
   if (!resp.ok) {
     const err = new Error(`HTTP ${resp.status}`)
     err.status = resp.status

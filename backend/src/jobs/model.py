@@ -43,6 +43,12 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def missing_analytics() -> dict:
+    """JSON-safe "no historical performance data" shape (WP21 §3) -- an LLM
+    question, or a DB question that has never been used before."""
+    return {"accuracy": None, "distinction": None, "accuracy_list": [], "distinction_list": []}
+
+
 @dataclass
 class Slot:
     slot_id: str
@@ -63,6 +69,12 @@ class Slot:
     db_id: Optional[int] = None
     audit_ref: Optional[str] = None
     was_repaired: bool = False
+    #: WP21 §3 -- the DB question's historical accuracy/distinction, snapshotted
+    #: at selection/replacement time (never re-fetched live, never for LLM
+    #: origin). JSON-safe: ``null`` singles, ``[]`` empty lists -- see
+    #: ``missing_analytics()``. Never part of ``question`` (the seven public
+    #: fields) and never sent to the generator.
+    analytics: dict = field(default_factory=missing_analytics)
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +93,7 @@ class Slot:
             "db_id": self.db_id,
             "audit_ref": self.audit_ref,
             "was_repaired": self.was_repaired,
+            "analytics": self.analytics,
         }
 
     @classmethod
@@ -101,6 +114,7 @@ class Slot:
             db_id=d.get("db_id"),
             audit_ref=d.get("audit_ref"),
             was_repaired=d.get("was_repaired", False),
+            analytics=d.get("analytics") or missing_analytics(),
         )
 
 
