@@ -138,13 +138,16 @@ content read, not a psychometric review — the owner should still eyeball both 
 - Calculation basis: `calculated` (not the conservative stale-pricing bound) for both the job and
   every ledger entry; `warnings: []` throughout — the pricing snapshot was 7 days old (< the
   30-day staleness threshold) per `GET /api/exam-jobs/readiness`.
-- **Finding — no "final backend-terminal cost line" exists in this codebase.** I searched
-  `backend/src/` and the generator's `production.py` for any `print`/`logger` call that emits a
-  cost figure to stdout; none exists. The backend terminal only carries Flask's own request log
-  (and, on startup, WP18's job-recovery line) — cumulative cost is exposed **only** through the
-  JSON API (`accumulated_cost_usd` / `remaining_cost_usd` / `cost_basis`) and the on-disk cost
-  ledger, not a printed line. Flagging this to the owner rather than asserting a match with §4 of
-  the brief that isn't actually implemented.
+- **~~Finding — no "final backend-terminal cost line" exists in this codebase~~ — CORRECTED, see
+  §8.** This section originally claimed no such line was ever printed. That was **wrong**: my
+  search grepped for lines containing both `print(` and `cost` together, which missed
+  `service._print_terminal_summary` (introduced in WP18, `d793a9f`) because it builds the text into
+  a `line` variable first and calls `print(line, flush=True)` — the literal word "cost" never
+  shares a source line with `print(`. That function *was* already firing after the initial run,
+  every retry, and every LLM replacement in this exact live scenario. The owner caught this and
+  requested the follow-up in §8 below (add the two missing fields it lacked — `operation` and
+  `remaining` ceiling — and prove the behavior offline). Left uncorrected in place, struck through,
+  so the mistake and its correction are both on the record rather than silently edited away.
 
 ### 4.4 Final origin sequence and history-policy result
 
@@ -201,16 +204,76 @@ live test" requirement and confirms the live scenario left no residue in tracked
 - No browser-automation tool is installed, so the live scenario was driven at the HTTP layer the
   frontend itself uses rather than through a rendered page; see §2 for why that is a faithful
   substitute here.
-- The "final backend-terminal cost line" named in the brief's §4 does not exist in the current
-  codebase (see §4.3) — a genuine gap between the brief's expectation and the implementation,
-  reported rather than papered over.
+- ~~The "final backend-terminal cost line" named in the brief's §4 does not exist in the current
+  codebase~~ — **corrected in §8**: it already existed (WP18) and this session's search for it was
+  flawed, not the codebase.
 
-## 7. Git
+## 7. Git (original WP20 commit)
 
-- `exam_generator/` carries one untracked `.DS_Store` (macOS Finder metadata, not a code change);
-  submodule `HEAD` is unchanged at `ea59cd857e5618b0260d2bb146dd5573c9ca2309`, nothing staged or
+- `exam_generator/` carried one untracked `.DS_Store` (macOS Finder metadata, not a code change);
+  submodule `HEAD` unchanged at `ea59cd857e5618b0260d2bb146dd5573c9ca2309`, nothing staged or
   committed there.
 - Outer commit: `WP20: validate live integrated exam flow` — the frontend UI-cleanup change + its
   test, the new backend test, and this WP's three `WPs/` files. **Not pushed.**
 - No live artifacts, exports, secrets, or `.env*` staged. No raw provider response or rendered
   prompt is included in this report or in any committed file.
+
+## 8. Follow-up (owner-approved, same WP) — backend-terminal cost line
+
+The owner asked me to "add" a backend-terminal cost line, on the strength of §4.3/§6's finding
+above. That finding was mistaken (see the struck-through notes in §4.3/§6): `service.
+_print_terminal_summary` already existed (WP18, `d793a9f`) and already fired after the initial
+run and after every LLM retry/replacement — accepted or failed, never for a DB-only replacement.
+**During the live scenario in §3 it actually printed twice** to the owner's backend terminal (once
+after the initial run, once after the DB→LLM `replace_llm` call) in its pre-follow-up format,
+which the owner can still see in that terminal's scrollback if kept. What it was missing against
+the owner's five requirements was two fields: an explicit `operation` code and the remaining
+ceiling. This follow-up closes exactly that gap; nothing about *when* it fires changed.
+
+**Change** (`backend/src/jobs/service.py`):
+- `_summary_dict` gains `"remaining_cost_usd": str(job.remaining_budget())`.
+- `_print_terminal_summary(job, *, header)` → `_print_terminal_summary(job, *, operation)`. The
+  line now reads
+  `[<HEADER>] job=<id> operation=<initial|retry|replace_llm> status=<...> llm_cost=$<...>
+  basis=<...> remaining=$<...> accepted=<n>/<n> failed=<n> retries=<n> pricing_warnings=<...>` —
+  a human-readable header derived from `operation` plus every field the owner asked for. Still only
+  identifiers/counts/costs; still never a prompt, a response, question content, or a secret.
+- The three call sites (`run_job`, `retry_slot`, `replace_via_llm`) now pass
+  `operation="initial"` / `"retry"` / `"replace_llm"` respectively — the same three call sites as
+  before, unconditional on accept/fail for retry and replacement. `replace_from_db` still never
+  calls it (confirmed by a new test, not just by reading the code).
+
+**New offline tests** (`backend/tests/test_wp20_terminal_cost_log.py`, 6 cases, fake providers,
+zero network):
+- initial run prints exactly one well-formed line (all required fields present; the accepted
+  question's own text is confirmed absent from the captured output);
+- a retry prints one line on **acceptance**;
+- a retry prints one line on a **charged failure** too (`RejectingProvider`);
+- an LLM replacement prints one line on **acceptance** and one on a **charged failure**;
+- a DB-only replacement (`replace_from_db`) prints **no** line, and moves no cost;
+- the printed `remaining=$` value matches `ceiling − accumulated` exactly.
+
+Every line is also checked against a forbidden-substring list (`prompt`, `system_prompt`,
+`OPENAI_API_KEY`, `sk-`, `Authorization`) as a belt-and-braces secret/content check.
+
+**§3 (submodule) 's untracked `.DS_Store` deleted** — `exam_generator/` is now fully clean
+(`git -C exam_generator status --porcelain` → empty); `HEAD` unchanged at
+`ea59cd857e5618b0260d2bb146dd5573c9ca2309`; nothing else in the submodule touched;
+`../exam_generator_pre_submodule_backup/` untouched.
+
+**Test / build results after the follow-up (still zero provider calls):**
+
+| Suite | Result |
+|---|---|
+| Backend `pytest -q` | 97 passed (91 + 6 new) |
+| Frontend `npm test` | 56 passed (unaffected — backend-only change) |
+| Frontend `npm run build` | OK (unaffected) |
+
+## 9. Git (follow-up commit)
+
+- Outer commit: `WP20 follow-up: print cumulative LLM cost` — `backend/src/jobs/service.py`,
+  `backend/tests/test_wp20_terminal_cost_log.py`, this report, and `WPs/ARCHITECT_HANDOFF.md`.
+  **Not pushed.**
+- `exam_generator/.DS_Store` deleted on disk; nothing in the submodule staged or committed (a
+  deleted untracked file leaves no submodule diff to stage).
+- No live artifacts, exports, secrets, `.env*`, or additional provider call in this follow-up.

@@ -3,8 +3,9 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-11 · **Latest completed WP:** WP20 (live end-to-end validation + `category_history`
-hidden from the exam UI).
+**Updated:** 2026-09-11 · **Latest completed WP:** WP20 + its owner-approved follow-up (live
+end-to-end validation, `category_history` hidden from the exam UI, and a corrected
+backend-terminal cost line).
 **Next:** none scheduled. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end and has now been
 validated against a real local backend + real OpenAI generation (one small mixed job, $0.087 of a
 $1.00 authorized ceiling). The legacy synchronous `/api/test/generate` + `/api/test/replace-question`
@@ -15,8 +16,8 @@ later WP.
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP20: validate live integrated exam flow` commit — `git rev-parse HEAD`; parent `d41f4f4`)* | branch `main`; **not pushed** |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, clean bar an untracked `.DS_Store`, **do not commit/push here** |
+| Outer `questions-db` | `.` | *(set by the `WP20 follow-up: print cumulative LLM cost` commit — `git rev-parse HEAD`; parent is the `WP20: validate live integrated exam flow` commit)* | branch `main`; **not pushed** |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, **fully clean** (the stray `.DS_Store` was deleted in the follow-up), **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
 contains `ea59cd8` (WP17GR). Pre-submodule snapshot preserved at
@@ -66,7 +67,7 @@ LLM readiness reports it missing otherwise).
 | Ledger-derived attempt/retry telemetry (WP19) | `backend/src/jobs/service.py::ledger_telemetry` → `result_view()["attempt_telemetry"]` |
 | Job-API exam screen (WP19) | `frontend/src/components/ExamGenerationSection.jsx` + `frontend/src/lib/examGen.js` (pure) + `examApi.js` (client) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py` |
 | Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
@@ -105,9 +106,21 @@ LLM readiness reports it missing otherwise).
   `category` across both transitions; Excel export = current LLM question only, no DB insert;
   Hebrew DOCX (± answers) strips job metadata, keeps the endpoint's own answer-shuffle, renders
   RTL. Full detail, per-operation costs, and the two accepted questions' seven fields are in
-  `WPs/WP20_ARCHITECT_REPORT.md`. **Finding:** no cost line is ever printed to the backend
-  terminal in this codebase — cumulative cost is API/ledger-only (see that report §4.3) if a
-  future WP wants to add one.
+  `WPs/WP20_ARCHITECT_REPORT.md`.
+- **WP20 follow-up — backend-terminal cost line, corrected.** WP20's live-validation report
+  originally claimed no cost line is ever printed to the backend terminal; that was a **search
+  error in that session**, not a real gap — `service._print_terminal_summary` has printed one
+  since WP18 (`d793a9f`), after the initial run and after every LLM retry/replacement (accepted or
+  failed alike), never for a DB-only replacement. The owner's follow-up asked for two fields it was
+  missing; both are now in: `_print_terminal_summary(job, *, operation)` (was `header=`) prints
+  `job=<id> operation=<initial|retry|replace_llm> status=<...> llm_cost=$<...> basis=<...>
+  remaining=$<...> accepted=<n>/<n> failed=<n> retries=<n> pricing_warnings=<...>` — never a
+  prompt, response, question, or secret. 6 new offline tests
+  (`backend/tests/test_wp20_terminal_cost_log.py`) prove: one well-formed line per initial run;
+  one line on a retry's acceptance *and* on its charged failure; one line on an LLM replacement's
+  acceptance *and* on its charged failure; **no** line (and no cost movement) for
+  `replace_from_db`; and the printed `remaining=$` matches `ceiling − accumulated` exactly. Full
+  detail in `WPs/WP20_ARCHITECT_REPORT.md` §8.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,
@@ -127,13 +140,8 @@ LLM readiness reports it missing otherwise).
    suite is green (886→900 collected, 726 passed, 174 Data/font skips) and the
    targeted production tests pass network-blocked from this repo's env.
 
-**Open items (post-WP20)**
+**Open items (post-WP20 follow-up)**
 
-- **No backend-terminal cost line exists.** WP20's live run found no `print`/`logger` call anywhere
-  in `backend/src/` or the generator's `production.py` that emits a cost figure to stdout — the
-  backend terminal only ever shows Flask's request log and the WP18 startup recovery line.
-  Cumulative cost is exposed only via the JSON API and the on-disk `cost_ledger`. If a
-  human-readable terminal summary is ever wanted, it needs a new WP.
 - No live failure/retry/rollback was exercised in WP20 (by design, to stay inside the one
   authorized paid job) — that surface keeps relying on the offline fake-provider suites
   (`test_wp18r_cross_source_replacements.py`, `test_wp19_frontend_contract.py`).

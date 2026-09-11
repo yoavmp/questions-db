@@ -372,7 +372,7 @@ def run_job(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) 
 
         _finalise(job, stopped_by_ceiling=stopped_by_ceiling)
         store.save(job)
-        _print_terminal_summary(job, header="EXAM JOB COMPLETE")
+        _print_terminal_summary(job, operation="initial")
         return job
     finally:
         if got_file_lock:
@@ -409,6 +409,7 @@ def _summary_dict(job: Job) -> dict:
         "status": job.status,
         "final_llm_cost_usd": job.accumulated_cost_usd,
         "cost_basis": job.cost_basis,
+        "remaining_cost_usd": str(job.remaining_budget()),
         "llm_accepted": sum(1 for s in llm_slots if s.status == "accepted"),
         "llm_failed": sum(1 for s in llm_slots if s.status in ("failed", "cost_ceiling")),
         "llm_requested": len(llm_slots),
@@ -420,13 +421,33 @@ def _summary_dict(job: Job) -> dict:
     }
 
 
-def _print_terminal_summary(job: Job, *, header: str) -> None:
-    """One visible backend-terminal line. Never prints prompts, answers, raw
-    responses or secrets -- only counts and costs."""
+#: operation code (matches ``cost_ledger`` ``kind``) -> human-readable terminal header
+_OPERATION_HEADERS = {
+    "initial": "EXAM JOB COMPLETE",
+    "retry": "EXAM JOB UPDATED (retry)",
+    "replace_llm": "EXAM JOB UPDATED (llm replace)",
+}
+
+
+def _print_terminal_summary(job: Job, *, operation: str) -> None:
+    """One visible backend-terminal line per paid LLM operation.
+
+    Called once initial exam generation reaches a terminal state (``operation=
+    "initial"``), and after every LLM retry / LLM replacement (``"retry"`` /
+    ``"replace_llm"``) -- accepted or failed alike, since a failed attempt is
+    still charged. Never called for a DB-only replacement (``replace_from_db``
+    makes no provider call and changes no cost -- no line for it).
+
+    Carries only job id, operation, cumulative cost, pricing basis, remaining
+    ceiling and warnings -- never prompts, provider responses, question
+    content or secrets.
+    """
     s = job.terminal_summary or _summary_dict(job)
+    header = _OPERATION_HEADERS.get(operation, f"EXAM JOB UPDATED ({operation})")
     line = (
-        f"[{header}] job={s['job_id']} status={s['status']} "
+        f"[{header}] job={s['job_id']} operation={operation} status={s['status']} "
         f"llm_cost=${s['final_llm_cost_usd']} basis={s['cost_basis']} "
+        f"remaining=${s['remaining_cost_usd']} "
         f"accepted={s['llm_accepted']}/{s['llm_requested']} failed={s['llm_failed']} "
         f"retries={s['retries']} "
         f"pricing_warnings={s['pricing_warnings'] or '-'}"
@@ -468,7 +489,7 @@ def retry_slot(job_id: str, slot_id: str, *, provider_factory: Optional[Provider
         )
         _finalise(job, stopped_by_ceiling=(result is not None and result.status == "cost_ceiling"))
         store.save(job)
-        _print_terminal_summary(job, header="EXAM JOB UPDATED (retry)")
+        _print_terminal_summary(job, operation="retry")
         return job
     finally:
         if got_file_lock:
@@ -650,7 +671,7 @@ def replace_via_llm(job_id: str, instance_id: str, *,
 
         _finalise(job, stopped_by_ceiling=(result is not None and result.status == "cost_ceiling"))
         store.save(job)
-        _print_terminal_summary(job, header="EXAM JOB UPDATED (llm replace)")
+        _print_terminal_summary(job, operation="replace_llm")
         return job
     finally:
         if got_file_lock:
