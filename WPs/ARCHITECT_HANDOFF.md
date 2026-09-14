@@ -3,25 +3,31 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-14 · **Latest completed WP:** WP22 (targeted live evidence validation —
-validation only, no production code touched).
-**Next:** none scheduled. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end, has been
-validated against a real local backend + real OpenAI generation (WP20: one small mixed job, $0.087
-of a $1.00 authorized ceiling; WP22: one integrated job + two reviewer-only replays, $0.1624 of a
-$0.50 authorized ceiling), and carries the analytics/export/audit surface WP21 restored plus
-WP21R's telemetry-clarity and crash-safety hardening. The legacy synchronous `/api/test/generate` +
-`/api/test/replace-question` endpoints are **still present** (nothing on the current screen calls
-them) and may be retired by a later WP.
+**Updated:** 2026-09-14 · **Latest completed WP:** WP24 (final generator metadata fix + integrated
+release — offline only, no live/provider call, `OPENAI_API_KEY` never accessed).
+**Next:** none scheduled. WP24 closes the one gap WP23R's generator-side fix left open (a declared
+`concept_mentions.term_id` absent from the inventory was still a hard rejection even when the
+displayed public text was valid — now reconciled the same way an existing-but-wrong `term_id` was),
+then re-pins this outer repo's submodule gitlink to the pushed generator commit and updates
+`backend/src/integration/generator_pin.py::EXPECTED_GENERATOR_PIN` to match, closing the
+long-standing (WP21GR→WP22) known `submodule_pin` drift warning. The "יצירת מבחן" screen uses
+`/api/exam-jobs*` end to end, has been validated against a real local backend + real OpenAI
+generation (WP20: one small mixed job, $0.087 of a $1.00 authorized ceiling; WP22: one integrated
+job + two reviewer-only replays, $0.1624 of a $0.50 authorized ceiling), and carries the
+analytics/export/audit surface WP21 restored plus WP21R's telemetry-clarity and crash-safety
+hardening. WP24 made no live/provider call, so none of that live-validated state changed. The
+legacy synchronous `/api/test/generate` + `/api/test/replace-question` endpoints are **still
+present** (nothing on the current screen calls them) and may be retired by a later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP22: targeted live evidence validation` commit — `git rev-parse HEAD`; parent is the `WP21R: clarify telemetry and harden audit storage` commit, `b549afa`)* | branch `main`; **not pushed** |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `fdde3ea48272e95dbf53b0c7d14f335a8968b11d` (WP21GR — checked out, **not yet re-pinned**; outer's recorded pin is still `ea59cd8`/WP17GR, a known non-blocking `readiness` warning, deliberately left as-is by WP22) | `heads/main`, **fully clean**, **do not commit/push here** |
+| Outer `questions-db` | `.` | *(set by the `WP24: release integrated exam generation` commit — `git rev-parse HEAD`; parent is the `WP22: targeted live evidence validation` commit, `9350877d`)* | branch `main`; pushed, `HEAD == origin/main` |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `eea91b06e2ec5d053eca3a5696656fdd354a05f9` (WP24 — checked out **and re-pinned**: outer's recorded `EXPECTED_GENERATOR_PIN` now matches exactly, closing the WP21GR→WP22 known `submodule_pin` drift warning) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
-contains `ea59cd8` (WP17GR). Pre-submodule snapshot preserved at
+contains `eea91b0` (WP24). Pre-submodule snapshot preserved at
 `../exam_generator_pre_submodule_backup/` (untouched).
 
 ## 2. Submodule update / re-pin procedure
