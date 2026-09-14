@@ -168,8 +168,10 @@ Post-push verification:
 
 - **Generator release SHA:** `eea91b06e2ec5d053eca3a5696656fdd354a05f9` — pushed to
   `https://github.com/yoavmp/exam-generator.git` `main`.
-- **Outer release SHA:** recorded in the closing terminal response (the `git rev-parse HEAD` taken
-  immediately after the outer push, together with the `HEAD == origin/main` confirmation).
+- **Outer release SHA:** `9b250145260c450ec7511660c809fefd00e98001` — the `WP24: release integrated
+  exam generation` commit, pushed to outer `origin/main`.
+  *(Post-release correction, WP24D: this report originally omitted the value here, pointing only to
+  "the closing terminal response"; the SHA is recorded above from that same response.)*
 
 ## 7. Skipped tests
 
@@ -177,8 +179,12 @@ The 174 generator skips are the unchanged, already-diagnosed set carried through
 (§3g of `exam_generator/WPs/ARCHITECT_HANDOFF.md`): synthetic-PDF extraction tests needing a
 Windows/Linux Hebrew TTF font this macOS box doesn't have (~70), and owner-local live-run replay
 fixtures under `exam_generator/artifacts/` not present in this checkout (~100) — production reads the
-committed `Data/index/`, never re-extracts, and none of these are needed for or gate production. Zero
-skips in the outer backend or frontend suites this WP.
+pre-built `exam_generator/Data/index/` directly, never re-extracts, and none of these are needed for or
+gate production. Zero skips in the outer backend or frontend suites this WP.
+*(Post-release correction, WP24D: this paragraph originally called `Data/index/` "committed." It is
+not: `exam_generator/Data/` is owner-local, Git-ignored data — see §9's corrected residual limitations
+and the canonical setup document's "Local course data required for LLM generation" section — copied
+into this installation out of band and not obtained by cloning either repository.)*
 
 ## 8. Confirmations
 
@@ -191,9 +197,23 @@ skips in the outer backend or frontend suites this WP.
 
 ## 9. Residual limitations
 
-None introduced by this WP. Carried forward, unchanged, from WP22 (`WPs/ARCHITECT_HANDOFF.md`
-§"Open items"): the two smallest-fix reviewer-prompt candidates WP22 surfaced but did not implement
-(a repair patch's `term_id` vs. its own replacement text; the reviewer's implicit-disproof strictness
-for a distractor already correctly excluded by evidence), and the pre-existing
-`backend/requirements.txt`/`exam_generator/constraints.txt` pin conflicts documented in
-`scripts/dev_install.sh`. Both are unrelated to WP24's scope and were not touched.
+*(Post-release correction, WP24D: this section originally carried two WP22-surfaced items forward as
+still open. Both were in fact already resolved, before this report was written, by generator-side WPs
+this report never cross-checked against. Corrected below rather than left standing.)*
+
+None introduced by this WP. Of the items WP22 surfaced as open (`WPs/ARCHITECT_HANDOFF.md` §"Open
+items"):
+
+- a reviewer repair patch's `term_id` vs. its own replacement text — **resolved in WP23**
+  (`TermSurfaceIndex` / `repair.resolve_reviewer_patch_term_id`, §1 of
+  `exam_generator/WPs/WP23_ARCHITECT_REPORT.md`);
+- the reviewer's explicit-disproof strictness for a distractor already correctly excluded by evidence
+  — **retired in WP23** (review-prompt criterion 4 rewrite, §4 of the same report), and further
+  sharpened by a new general distractor answer-type-alignment requirement **added in WP23R** (§2 of
+  `exam_generator/WPs/WP23R_ARCHITECT_REPORT.md`).
+
+Neither is open work as of this release. The one item still genuinely open and unrelated to WP24's
+scope is the pre-existing `backend/requirements.txt`/`exam_generator/constraints.txt` dependency-pin
+split (`pytest` 7.4.2 vs. 9.1.1; `MarkupSafe` 2.1.3 vs. 3.0.3) — currently non-blocking and already
+handled by the documented integrated installation process (`scripts/dev_install.sh` installs the
+generator package `--no-deps` and keeps the backend's own pins; see `SETUP.md`).

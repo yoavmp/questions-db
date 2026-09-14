@@ -4,7 +4,10 @@
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
 **Updated:** 2026-09-14 · **Latest completed WP:** WP24 (final generator metadata fix + integrated
-release — offline only, no live/provider call, `OPENAI_API_KEY` never accessed).
+release — offline only, no live/provider call, `OPENAI_API_KEY` never accessed). **WP24 is the
+functional release**: generator complete suite 999 collected/825 passed/174 skipped/0 failed, outer
+backend complete suite 121/121 passed, frontend complete suite 81/81 passed, frontend production build
+succeeded — all suites passed, 0 failures anywhere (`WPs/WP24_ARCHITECT_REPORT.md` §4).
 **Next:** none scheduled. WP24 closes the one gap WP23R's generator-side fix left open (a declared
 `concept_mentions.term_id` absent from the inventory was still a hard rejection even when the
 displayed public text was valid — now reconciled the same way an existing-but-wrong `term_id` was),
@@ -23,7 +26,7 @@ present** (nothing on the current screen calls them) and may be retired by a lat
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP24: release integrated exam generation` commit — `git rev-parse HEAD`; parent is the `WP22: targeted live evidence validation` commit, `9350877d`)* | branch `main`; pushed, `HEAD == origin/main` |
+| Outer `questions-db` | `.` | `9b250145260c450ec7511660c809fefd00e98001` (the `WP24: release integrated exam generation` commit; parent is the `WP22: targeted live evidence validation` commit, `9350877d`) | branch `main`; pushed, `HEAD == origin/main` |
 | Generator `exam-generator` | `exam_generator/` (submodule) | `eea91b06e2ec5d053eca3a5696656fdd354a05f9` (WP24 — checked out **and re-pinned**: outer's recorded `EXPECTED_GENERATOR_PIN` now matches exactly, closing the WP21GR→WP22 known `submodule_pin` drift warning) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
@@ -52,9 +55,14 @@ python -c "from src.integration.category_map import verify_against_generator_cat
 
 Rules: the outer repo tracks **only** `.gitmodules` and the `exam_generator`
 gitlink. Never `git add exam_generator/<file>`. Never commit or push inside
-`exam_generator/`. `exam_generator/Data/` is git-ignored course runtime input,
-supplied out of band (copy it into the submodule working tree after any re-clone —
-LLM readiness reports it missing otherwise).
+`exam_generator/`. Course source data and its derived index
+(`exam_generator/Data/index/`, `exam_generator/Data/Course_Material_Summary.pdf`) are local, Git-ignored
+(`exam_generator/.gitignore`), and never committed by either repository — `git clone
+--recurse-submodules` does not download them. This installation's copy already exists locally, so it is
+LLM-generation-ready on that axis (subject to `OPENAI_API_KEY` and the other `readiness_report()`
+checks); a **fresh clone is DB-only** until the owner restores or rebuilds that exact `Data/` tree out
+of band. See `SETUP.md` § "Local course data required for LLM generation" for the procedure and the
+readiness check.
 
 ## 3. Integration surface (outer repo)
 
@@ -222,16 +230,18 @@ LLM readiness reports it missing otherwise).
    suite is green (886→900 collected, 726 passed, 174 Data/font skips) and the
    targeted production tests pass network-blocked from this repo's env.
 
-**Open items (post-WP22)**
+**Open items (post-WP22, corrected post-release by WP24D)**
 
-- Two smallest-fix candidates surfaced by WP22's live evidence validation, **not implemented**
-  (validation-only scope): (1) a reviewer-proposed repair patch can carry a `term_id` that doesn't
-  match its own replacement text, and gets correctly-but-wastefully refused by the deterministic
-  patch validator — tighten the review-prompt instruction or add a deterministic cross-check on
-  `term_id` vs. replacement text. (2) the reviewer requires an *explicit* source disproof to mark a
-  distractor `distractors_incorrect_and_plausible`, even when the (WP21GR) evidence pack correctly
-  surfaces a relevant unit that only implicitly rules it out — a possible reviewer-instruction
-  relaxation, not an evidence-pack change. See `WPs/WP22_ARCHITECT_REPORT.md` §7 for detail.
+*(WP24D correction: the two items WP22 surfaced here as not-yet-implemented were both resolved by
+generator-side WPs before WP24's own release and are removed from this list, not carried forward as
+open.)* Resolved: (1) a reviewer-proposed repair patch carrying a `term_id` that doesn't match its own
+replacement text — **resolved in WP23** (`exam_generator`'s `TermSurfaceIndex` /
+`repair.resolve_reviewer_patch_term_id`); (2) the reviewer's requirement of an *explicit* source
+disproof to mark a distractor `distractors_incorrect_and_plausible` — **retired in WP23** (review-prompt
+criterion 4 rewrite), and further sharpened by a new general distractor answer-type-alignment
+requirement **added in WP23R**. Detail in `exam_generator/WPs/WP23_ARCHITECT_REPORT.md` and
+`exam_generator/WPs/WP23R_ARCHITECT_REPORT.md`.
+
 - Overall analytics (mean accuracy, distinction-threshold count) is deliberately **frontend-only**
   and unpersisted — matches the legacy architecture exactly, not an oversight. If it's ever wanted
   server-side, it needs a new WP.

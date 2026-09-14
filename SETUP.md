@@ -51,6 +51,27 @@ value is never read or logged). Without it — or without the generator's local
 `Data/` — the database-only features keep working; LLM job creation is refused
 with a safe reason.
 
+#### Local course data required for LLM generation
+
+1. `git clone --recurse-submodules` (or `git submodule update --init --recursive`)
+   fetches the pinned `exam_generator` code, but it does **not** download
+   `exam_generator/Data/` — that course source data and its derived search index
+   are not part of either Git repository.
+2. To enable LLM generation, the owner must securely copy or rebuild that data at
+   the exact paths the generator adapter expects:
+   `exam_generator/Data/index/` (the pre-built search index directory) and
+   `exam_generator/Data/Course_Material_Summary.pdf` (the source PDF).
+3. This copied data must stay Git-ignored (already covered by
+   `exam_generator/.gitignore`) and must never be committed or pushed to either
+   repository.
+4. To check availability without exposing course text or any secret, call
+   `GET /api/exam-jobs/readiness` — its `local_data` check (and the `data`
+   section of the response) reports only boolean presence of the index
+   directory and the PDF, never their contents.
+5. Missing local data disables LLM generation only (`ready_for_llm: false`,
+   with a safe reason listed in `blocking_reasons`); it never blocks DB-only
+   exam functionality (`db_only_available` is always `true`).
+
 <details><summary>Manual / legacy setup (backend only, no generator)</summary>
 
 ```bash
