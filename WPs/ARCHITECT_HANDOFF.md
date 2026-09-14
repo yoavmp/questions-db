@@ -3,21 +3,22 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-11 · **Latest completed WP:** WP21R (separated retry-vs-replacement telemetry
-display and made every LLM invocation's audit directory crash-safe via an authoritative UUID).
+**Updated:** 2026-09-14 · **Latest completed WP:** WP22 (targeted live evidence validation —
+validation only, no production code touched).
 **Next:** none scheduled. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end, has been
 validated against a real local backend + real OpenAI generation (WP20: one small mixed job, $0.087
-of a $1.00 authorized ceiling), and now also carries the analytics/export/audit surface WP21
-restored plus WP21R's telemetry-clarity and crash-safety hardening. The legacy synchronous
-`/api/test/generate` + `/api/test/replace-question` endpoints are **still present** (nothing on the
-current screen calls them) and may be retired by a later WP.
+of a $1.00 authorized ceiling; WP22: one integrated job + two reviewer-only replays, $0.1624 of a
+$0.50 authorized ceiling), and carries the analytics/export/audit surface WP21 restored plus
+WP21R's telemetry-clarity and crash-safety hardening. The legacy synchronous `/api/test/generate` +
+`/api/test/replace-question` endpoints are **still present** (nothing on the current screen calls
+them) and may be retired by a later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | *(set by the `WP21R: clarify telemetry and harden audit storage` commit — `git rev-parse HEAD`; parent is the `WP21: restore exam analytics and complete exports` commit, `05e6162`)* | branch `main`; **not pushed** |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `ea59cd857e5618b0260d2bb146dd5573c9ca2309` | `heads/main`, **fully clean**, **do not commit/push here** |
+| Outer `questions-db` | `.` | *(set by the `WP22: targeted live evidence validation` commit — `git rev-parse HEAD`; parent is the `WP21R: clarify telemetry and harden audit storage` commit, `b549afa`)* | branch `main`; **not pushed** |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `fdde3ea48272e95dbf53b0c7d14f335a8968b11d` (WP21GR — checked out, **not yet re-pinned**; outer's recorded pin is still `ea59cd8`/WP17GR, a known non-blocking `readiness` warning, deliberately left as-is by WP22) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
 contains `ea59cd8` (WP17GR). Pre-submodule snapshot preserved at
@@ -173,6 +174,27 @@ LLM readiness reports it missing otherwise).
      `audit_ref`. Old-style `audit_ref` values (pre-WP21R, no UUID) still load and display fine —
      nothing validates an *already-persisted* reference's format. Full detail, including the exact
      crash simulation, in `WPs/WP21R_ARCHITECT_REPORT.md`.
+- **WP22 — targeted live evidence validation (validation only, no code change).** Three paid
+  operations under a hard $0.50 shared ceiling, real cost **$0.1624412** total, none refused for
+  budget. **Op 1:** one integrated production job (`אמבריולוגיה`, `C=2/A=1/B=1`) via the normal
+  `/api/exam-jobs` path — confirmed the DB-selected question is auto-supplied as the LLM slot's
+  previous-question context with no manual wiring, confirmed the WP21R invocation-manifest stayed
+  byte-identical and the audit directory collision-free, real cost $0.0932765, one real attempt,
+  `question_rejected` (a reviewer patch was mislabeled with the wrong `term_id` and correctly refused
+  by the deterministic patch validator — looks like a reviewer-prompt defect, not an evidence gap).
+  **Ops 2–3:** since no safe interface exists for a reviewer-only replay without `OPENAI_API_KEY`, a
+  new git-ignored one-shot script (`exam_generator/artifacts/wp22/reviewer_replay.py`, untracked, not
+  part of this repo's tracked tree) replayed the two preserved WP21G/WP21GR candidates
+  (`chapter_01_q001`, `chapter_03_emb_001`) through the **unmodified** production orchestrator
+  (`generate_one_question`) with their current WP21GR candidate-aware evidence pack, budget-guarded
+  before each real call, run once by the owner from their own terminal. Neither flipped to accepted;
+  `chapter_03_emb_001` gained 2 of 4 previously-failing criteria (`exactly_one_correct_answer`,
+  `grounded_in_context`); both remain blocked on the same root cause — the reviewer requires an
+  *explicit* source disproof per distractor and won't infer implausibility from a unit that only
+  describes the distractor's own role, even though the (WP21GR-fixed) evidence pack now surfaces
+  that unit correctly. This is a reviewer-strictness issue, not a retrieval gap. Full detail,
+  exact costs, criterion-by-criterion diffs, and both replayed public questions in
+  `WPs/WP22_ARCHITECT_REPORT.md`.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,
@@ -194,8 +216,16 @@ LLM readiness reports it missing otherwise).
    suite is green (886→900 collected, 726 passed, 174 Data/font skips) and the
    targeted production tests pass network-blocked from this repo's env.
 
-**Open items (post-WP21R)**
+**Open items (post-WP22)**
 
+- Two smallest-fix candidates surfaced by WP22's live evidence validation, **not implemented**
+  (validation-only scope): (1) a reviewer-proposed repair patch can carry a `term_id` that doesn't
+  match its own replacement text, and gets correctly-but-wastefully refused by the deterministic
+  patch validator — tighten the review-prompt instruction or add a deterministic cross-check on
+  `term_id` vs. replacement text. (2) the reviewer requires an *explicit* source disproof to mark a
+  distractor `distractors_incorrect_and_plausible`, even when the (WP21GR) evidence pack correctly
+  surfaces a relevant unit that only implicitly rules it out — a possible reviewer-instruction
+  relaxation, not an evidence-pack change. See `WPs/WP22_ARCHITECT_REPORT.md` §7 for detail.
 - Overall analytics (mean accuracy, distinction-threshold count) is deliberately **frontend-only**
   and unpersisted — matches the legacy architecture exactly, not an oversight. If it's ever wanted
   server-side, it needs a new WP.
