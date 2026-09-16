@@ -63,6 +63,41 @@ describe('job endpoints', () => {
   })
 })
 
+describe('WP26 jobs-list / branch / exclusion-preview endpoints', () => {
+  it('fetchJobsList GETs /exam-jobs and returns the jobs array', async () => {
+    fetch.mockReturnValueOnce(okJson({ jobs: [{ job_id: 'j1' }, { job_id: 'j2' }] }))
+    const jobs = await api.fetchJobsList()
+    expect(jobs).toHaveLength(2)
+    expect(fetch.mock.calls[0][0]).toMatch(/\/api\/exam-jobs$/)
+  })
+
+  it('fetchJobsList tolerates a missing jobs key', async () => {
+    fetch.mockReturnValueOnce(okJson({}))
+    expect(await api.fetchJobsList()).toEqual([])
+  })
+
+  it('branchJob POSTs the identity to /exam-jobs/<id>/branch', async () => {
+    fetch.mockReturnValueOnce(okJson({ job_id: 'child-1', parent_job_id: 'j1' }))
+    const identity = { mode: 'custom', custom_name: 'גרסה חדשה' }
+    const res = await api.branchJob('j1', identity)
+    expect(res.job_id).toBe('child-1')
+    const [url, opts] = fetch.mock.calls[0]
+    expect(url).toMatch(/\/exam-jobs\/j1\/branch$/)
+    expect(opts.method).toBe('POST')
+    expect(JSON.parse(opts.body)).toEqual({ identity })
+  })
+
+  it('previewExclusionFile POSTs multipart form data to the preview endpoint', async () => {
+    fetch.mockReturnValueOnce(okJson({ resolved_db_ids: [1, 2], counts: {}, warnings: [] }))
+    const file = new File(['a,b'], 'excl.xlsx')
+    const res = await api.previewExclusionFile(file)
+    expect(res.resolved_db_ids).toEqual([1, 2])
+    const [url, opts] = fetch.mock.calls[0]
+    expect(url).toMatch(/\/exam-jobs\/exclusions\/preview$/)
+    expect(opts.body).toBeInstanceOf(FormData)
+  })
+})
+
 describe('downloadExamDocx', () => {
   it('POSTs only the seven public fields (job metadata stripped) to /test/export-docx', async () => {
     fetch.mockReturnValueOnce(

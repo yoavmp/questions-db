@@ -3,41 +3,79 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-16 · **Latest completed WP:** WP25G (inverse semantic duplicate guard — offline
-only, no live/provider call, `OPENAI_API_KEY` never accessed). Fixes the demonstrated uniqueness
-failure where an accepted question was replaced by another question testing the same fact with the
-stem and correct-answer roles reversed (Arachnoid Villi / one-way CSF flow direction). **Root cause,
-proven with an automated regression test (`backend/tests/test_wp25g_inverse_duplicate_guard.py`): a
-missing-context plumbing bug in `replace_via_llm`, not a reviewer false negative.** `_previous_for_slot`
-always excludes the target slot's own current question (by `instance_id`), and `category_history` cannot
-yet hold it either — it is appended there only *after* the same call succeeds — so the one question being
-displaced was never shown to the generator/reviewer judging its own replacement. Fixed by appending the
-slot's own old question to `previous` **ephemerally, for that one call only**
-(`backend/src/jobs/service.py::replace_via_llm`); `category_history` itself is still mutated only after
-success, unchanged. The generator submodule (re-pinned to
-`d20c46bbb332e4d40f735e843d31113176b755e5`, `WP25G: reject inverse semantic duplicates`) adds a matching
-strengthened prompt + deterministic public-text backstop on its own side — see
-`exam_generator/WPs/WP25G_GENERATOR_REPORT.md` and this repo's own `WPs/WP25G_ARCHITECT_REPORT.md`.
-**Next:** none scheduled.
+**Updated:** 2026-09-16 · **Latest completed WP:** WP26 (named exam history,
+immutable branches, UI polish, and DB exclusions — outer-only, offline only,
+no live/provider call, `OPENAI_API_KEY` never accessed, generator untouched).
+Supersedes the never-executed `WP25_Named_Exam_History_Branches_And_UI_Polish.md`.
 
-Prior state (WP24D/WP24, carried forward, untouched by WP25G's outer diff beyond the one
-`replace_via_llm` context fix + the re-pin): generator complete suite (pre-WP25G) 999 collected/825
-passed/174 skipped/0 failed, outer backend complete suite 121/121 passed, frontend complete suite 81/81
-passed, frontend production build succeeded. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end,
-has been validated against a real local backend + real OpenAI generation (WP20: one small mixed job,
-$0.087 of a $1.00 authorized ceiling; WP22: one integrated job + two reviewer-only replays, $0.1624 of a
-$0.50 authorized ceiling), and carries the analytics/export/audit surface WP21 restored plus WP21R's
-telemetry-clarity and crash-safety hardening. Neither WP24 nor WP25G made a live/provider call, so none
-of that live-validated state changed. The legacy synchronous `/api/test/generate` +
-`/api/test/replace-question` endpoints are **still present** (nothing on the current screen calls them)
-and may be retired by a later WP.
+WP26 adds, backward-compatibly, on top of the existing `/api/exam-jobs*` job
+model (WP18-WP25G, unchanged):
+
+- **Naming** (`backend/src/jobs/naming.py`): structured (`קורס`/`שנה`/`סוג`/`מועד`)
+  or custom exam names, a normalized `display_name` + filesystem-safe `slug`,
+  and a calculated (never persisted) fallback label for any job with no
+  identity -- every pre-WP26 job included.
+- **History** (`GET /api/exam-jobs`, `service.list_jobs`): every persisted job,
+  newest-first, safe list fields only (no question bodies/prompts/audits).
+- **Immutable branching** (`POST /api/exam-jobs/<id>/branch`,
+  `service.branch_job`): a new job id/slot ids/instance ids, copies current
+  question snapshots + `category_history` + `excluded_db_ids`, starts with an
+  empty cost ledger and the parent's ceiling as its new default -- the parent
+  `job.json` is only ever read, never written, so it stays byte-for-byte
+  unchanged on both success and failure. Only a `completed` job may be
+  branched (a typed `JobConflict` otherwise -- no invented partial-branch
+  semantics).
+- **Optional DB exclusion workbook** (`backend/src/jobs/exclusions.py`,
+  `POST /api/exam-jobs/exclusions/preview`): local, non-provider `.xlsx`
+  parsing/resolution (id-authoritative, then text+category, then text-only;
+  ambiguous fallbacks are excluded conservatively and warned, never guessed)
+  feeding a normalized, deduplicated `excluded_db_ids` set that both initial
+  DB selection and every later DB replacement enforce, with an atomic,
+  Hebrew, category-specific pre-flight failure if a category can no longer be
+  satisfied -- before any paid LLM call.
+- **Retry/replacement telemetry correction** (`service.py`): an intentional
+  `replace_llm` no longer bumps the mutable per-slot retry counter, and
+  `terminal_summary`'s `retries`/`replacements` are now derived from the
+  immutable `cost_ledger`'s operation `kind` (already how `ledger_telemetry`/
+  `attempt_telemetry` worked since WP21R) -- so even an old job whose
+  persisted counter was already conflated reports correctly, without
+  rewriting its file.
+- **Frontend** (`ExamGenerationSection.jsx`, `App.jsx`): a setup step with the
+  identity fields + exclusion-workbook preview; a saved-exam selector; separate
+  active-editable-job vs. viewed-job local state (survives navigation/restart);
+  a visibly read-only historical view with mutation controls hidden and
+  "יצירת גרסה חדשה" prominent; the exam slug used in DOCX/Excel filenames; the
+  required brand title, About-tab content, RTL tab order
+  (`אודות המערכת` far right / `עיון בשאלות` far left), non-wrapping export
+  button text, and a question-browser topic bar now sourced from
+  `GET /api/test/categories` (the same authoritative `CATEGORY_ORDER` the
+  backend uses) instead of question-insertion order.
+
+Full detail, contracts, and the exact ambiguous-match interpretation in
+`WPs/WP26_ARCHITECT_REPORT.md`. **Next:** none scheduled.
+
+Prior state (WP25G and earlier, carried forward, untouched by WP26 beyond the
+items listed above): generator complete suite (pre-WP26) 999 collected/825
+passed/174 skipped/0 failed, outer backend complete suite 122/122 passed
+pre-WP26 + 74 new WP26 tests (196/196 total), frontend complete suite 95/95
+passed pre-WP26 + 12 new WP26 tests (107/107 total), frontend production build
+succeeded. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end, has been
+validated against a real local backend + real OpenAI generation (WP20: one
+small mixed job, $0.087 of a $1.00 authorized ceiling; WP22: one integrated
+job + two reviewer-only replays, $0.1624 of a $0.50 authorized ceiling), and
+carries the analytics/export/audit surface WP21 restored, WP21R's
+telemetry-clarity and crash-safety hardening, and WP25G's inverse-duplicate
+guard. WP26 made no live/provider call, so none of that live-validated state
+changed. The legacy synchronous `/api/test/generate` + `/api/test/replace-
+question` endpoints are **still present** (nothing on the current screen
+calls them) and may be retired by a later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | Before WP25G: `9c26189ea7f6bfe8273bece953fa5375719a0e28` (`WP24D: correct release documentation`). WP25G committed as `WP25G: integrate inverse duplicate guard` — exact SHA in this WP's closing terminal response / `WPs/WP25G_ARCHITECT_REPORT.md` | branch `main`; pushed after WP25G, `HEAD == origin/main` |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `d20c46bbb332e4d40f735e843d31113176b755e5` (`WP25G: reject inverse semantic duplicates` — checked out **and re-pinned**: outer's recorded `EXPECTED_GENERATOR_PIN` matches exactly) | `heads/main`, **fully clean**, **do not commit/push here** |
+| Outer `questions-db` | `.` | Before WP26: `63398340b1f6d66b39bf8f6bd2995f3fe7987996` (`WP25G: integrate inverse duplicate guard`). WP26 committed as `WP26: add named exam history and exclusions` — exact SHA in this WP's closing terminal response / `WPs/WP26_ARCHITECT_REPORT.md` | branch `main`; pushed after WP26 (if fast-forward-safe), `HEAD == origin/main` |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `d20c46bbb332e4d40f735e843d31113176b755e5` (`WP25G: reject inverse semantic duplicates` — **unchanged by WP26**: outer's recorded `EXPECTED_GENERATOR_PIN` still matches exactly) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
 contains `d20c46b` (WP25G). Pre-submodule snapshot preserved at

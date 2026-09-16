@@ -34,7 +34,8 @@ from src.integration.generator_adapter import AdapterRequest, generate_category_
 from src.integration.owner_policy import MAX_ATTEMPTS_PER_LLM_SLOT
 from src.integration.readiness import readiness_report
 from src.integration.request_contract import RequestContractError, parse_category_request
-from src.jobs import store
+from src.jobs import naming, store
+from src.jobs.exclusions import ExclusionParseError, revalidate_ids
 from src.jobs.model import CategoryPlan, Job, Slot, SEVEN, missing_analytics, new_id, now_iso
 from src.utils.category_order import CATEGORY_ORDER
 
@@ -61,16 +62,19 @@ class JobConflict(RuntimeError):
 # --------------------------------------------------------------------------- #
 # DB selection (needs a Flask app context)
 # --------------------------------------------------------------------------- #
-def _db_availability(category: str) -> int:
+def _db_availability(category: str, exclude_ids: frozenset = frozenset()) -> int:
     from src.models.user import db
     from src.models.question import Question
 
-    return Question.query.filter(
+    q = Question.query.filter(
         db.or_(
             Question.category == category,
             Question.categories_json.like(f'%"{category}"%'),
         )
-    ).count()
+    )
+    if exclude_ids:
+        q = q.filter(~Question.id.in_(exclude_ids))
+    return q.count()
 
 
 def _select_db_questions(category: str, count: int, exclude_ids: set[int], rng: random.Random) -> list:
@@ -167,22 +171,52 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
                 "LLM generation is not ready: " + "; ".join(report["blocking_reasons"])
             )
 
-    # DB availability check BEFORE creating the job
+    # WP26 §1 -- structured/custom identity (optional; a job without one falls
+    # back to naming.fallback_label everywhere it is displayed).
+    try:
+        identity = naming.resolve_identity(payload.get("identity"))
+    except naming.IdentityError as exc:
+        raise JobError(str(exc)) from exc
+
+    # WP26 §2-§3 -- backend revalidation of client-supplied exclusion ids:
+    # never trust the preview result blindly. Malformed ids are rejected
+    # outright; well-formed ids that vanished since the preview are dropped
+    # with a warning, never blocking job creation for an unrelated reason.
+    try:
+        excluded_ids, excl_warnings = revalidate_ids(payload.get("excluded_db_ids"))
+    except ExclusionParseError as exc:
+        raise JobError(str(exc)) from exc
+    excluded_id_set = set(excluded_ids)
+
+    # DB availability check BEFORE creating the job -- exclusions count against
+    # availability atomically, with a category-specific Hebrew message, so no
+    # partial DB selection and no LLM call ever happens when a category can't
+    # be satisfied (WP26 §3 safety requirement).
     for req, _ in parsed:
-        avail = _db_availability(req.category)
+        avail = _db_availability(req.category, exclude_ids=excluded_id_set)
         if req.database > avail:
             raise JobError(
-                f"category {req.category!r}: database={req.database} exceeds availability={avail}"
+                f"קטגוריה '{req.category}': נדרשו {req.database} שאלות מהמאגר, "
+                f"זמינות בפועל {avail} (לאחר החרגות)"
             )
 
-    job = Job(job_id=new_id(), cost_ceiling_usd=str(cap), request={
-        "categories": {req.category: {"total": req.total, "database": req.database, "llm": req.llm}
-                       for req, _ in parsed},
-        "cost_ceiling_usd": str(cap),
-    })
+    job = Job(
+        job_id=new_id(), cost_ceiling_usd=str(cap),
+        request={
+            "categories": {req.category: {"total": req.total, "database": req.database, "llm": req.llm}
+                           for req, _ in parsed},
+            "cost_ceiling_usd": str(cap),
+        },
+        identity=identity,
+        excluded_db_ids=sorted(excluded_id_set),
+    )
+    job.root_job_id = job.job_id
+    if excl_warnings:
+        for msg in excl_warnings:
+            job.warnings.append({"code": "excluded_id_dropped", "message": msg})
 
     rng = random.Random(seed)
-    exclude_ids: set[int] = set()
+    exclude_ids: set[int] = set(excluded_id_set)
 
     # canonical order + running global number base
     parsed.sort(key=lambda pc: CATEGORY_ORDER.index(pc[0].category))
@@ -469,6 +503,12 @@ def _finalise(job: Job, *, stopped_by_ceiling: bool) -> None:
 
 def _summary_dict(job: Job) -> dict:
     llm_slots = [s for s in job.slots if s.kind == "llm"]
+    # WP26 §7: retries/replacements are derived ONLY from the immutable
+    # cost_ledger's operation `kind` -- never from the mutable, historically
+    # conflated `slot.retries` counter -- so an old persisted job whose slots
+    # still carry a pre-WP26 conflated count reports correctly here too,
+    # without rewriting its file.
+    ledger_totals = ledger_telemetry(job)["totals"]
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -478,7 +518,8 @@ def _summary_dict(job: Job) -> dict:
         "llm_accepted": sum(1 for s in llm_slots if s.status == "accepted"),
         "llm_failed": sum(1 for s in llm_slots if s.status in ("failed", "cost_ceiling")),
         "llm_requested": len(llm_slots),
-        "retries": sum(s.retries for s in llm_slots),
+        "retries": ledger_totals["retries"],
+        "replacements": ledger_totals["replacements"],
         "pricing_verification": job.pricing_verification,
         "pricing_warnings": sorted({w.get("code") for w in job.warnings if w.get("code")}),
         "cost_ceiling_usd": job.cost_ceiling_usd,
@@ -514,7 +555,7 @@ def _print_terminal_summary(job: Job, *, operation: str) -> None:
         f"llm_cost=${s['final_llm_cost_usd']} basis={s['cost_basis']} "
         f"remaining=${s['remaining_cost_usd']} "
         f"accepted={s['llm_accepted']}/{s['llm_requested']} failed={s['llm_failed']} "
-        f"retries={s['retries']} "
+        f"retries={s['retries']} replacements={s['replacements']} "
         f"pricing_warnings={s['pricing_warnings'] or '-'}"
     )
     log.warning(line)
@@ -666,7 +707,7 @@ def replace_from_db(job_id: str, instance_id: str, *, extra_exclude_ids: tuple =
         # question; for LLM->DB the current slot has no db_id and nothing extra
         # is excluded.
         in_exam = {s.db_id for s in job.slots if s.kind == "database" and s.db_id is not None}
-        exclude = in_exam | set(extra_exclude_ids)
+        exclude = in_exam | set(extra_exclude_ids) | set(job.excluded_db_ids)
         rng = random.Random()
         try:
             chosen = _select_db_questions(slot.category, 1, exclude, rng)[0]
@@ -738,7 +779,14 @@ def replace_via_llm(job_id: str, instance_id: str, *,
         # is still touched only after success, unchanged from before.
         previous = _previous_for_slot(job, slot) + [old_question]
 
-        slot.retries += 1
+        # WP26 §7: an intentional replace_llm is not a failure-driven retry --
+        # `slot.retries` (surfaced as `generation_meta.retries_by_slot`) must
+        # count genuine retry_slot operations only. The ledger's own `kind`
+        # field already distinguishes "retry" from "replace_llm" regardless
+        # (see `ledger_telemetry` / `_summary_dict`), but the mutable
+        # per-slot counter used to be bumped here too and, unlike a failed
+        # attempt, a SUCCESSFUL replace_llm never rolled it back -- silently
+        # inflating every later "retries" reading for this slot.
         result = _generate_one(job, slot, kind="replace_llm", provider=provider, previous=previous)
 
         if result is not None and result.status == "accepted":
@@ -920,7 +968,146 @@ def result_view(job: Job) -> dict:
     view["category_history"] = job.category_history
     view["cost_ledger"] = job.cost_ledger
     view["attempt_telemetry"] = ledger_telemetry(job)
+    # WP26 §1/§4/§5 -- naming + lineage. `display_name` is always present
+    # (calculated fallback for a job with no `identity`, never persisted).
+    # `excluded_db_ids_count` is a safe diagnostic (§3): the raw ids and
+    # excluded question TEXT are never surfaced here.
+    view["identity"] = job.identity
+    view["display_name"] = (
+        job.identity["display_name"] if job.identity else naming.fallback_label(job.job_id, job.created_utc)
+    )
+    view["slug"] = job.identity["slug"] if job.identity else naming.safe_slug(view["display_name"])
+    view["parent_job_id"] = job.parent_job_id
+    view["root_job_id"] = job.root_job_id
+    view["excluded_db_ids_count"] = len(job.excluded_db_ids)
+    view["branchable"] = job.status == "completed"
     return view
+
+
+# --------------------------------------------------------------------------- #
+# WP26 §1 -- read-only jobs list (newest-first, safe fields only)
+# --------------------------------------------------------------------------- #
+def list_jobs() -> list[dict]:
+    """Every persisted job, newest-first. Deliberately excludes question
+    bodies, prompts, audits and course-source content -- see ``result_view``
+    (via ``GET /exam-jobs/<id>``) for the full detail of one job."""
+    jobs: list[Job] = []
+    for jid in store.list_job_ids():
+        job = store.load(jid)
+        if job is not None:
+            jobs.append(job)
+    jobs.sort(key=lambda j: j.created_utc, reverse=True)
+
+    out = []
+    for job in jobs:
+        display_name = (
+            job.identity["display_name"] if job.identity
+            else naming.fallback_label(job.job_id, job.created_utc)
+        )
+        slug = job.identity["slug"] if job.identity else naming.safe_slug(display_name)
+        accepted = sum(1 for s in job.slots if s.status == "accepted")
+        out.append({
+            "job_id": job.job_id,
+            "display_name": display_name,
+            "slug": slug,
+            "created_utc": job.created_utc,
+            "updated_utc": job.updated_utc,
+            "status": job.status,
+            "accepted_count": accepted,
+            "total_count": len(job.slots),
+            "parent_job_id": job.parent_job_id,
+            "root_job_id": job.root_job_id,
+            "excluded_db_ids_count": len(job.excluded_db_ids),
+            "branchable": job.status == "completed",
+        })
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# WP26 §4 -- immutable snapshot branching
+# --------------------------------------------------------------------------- #
+def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
+    """Create a new, independent, editable job from a completed saved exam.
+
+    The parent's ``job.json`` is only ever read here, never written -- on
+    both success and failure it stays byte-for-byte unchanged. Only a
+    ``completed`` job may be branched (every slot is accepted by definition);
+    any other status is a typed safe conflict rather than an invented
+    partial-branch semantic.
+
+    The child gets a fresh job id and fresh slot/instance ids, starts with an
+    empty cost ledger/audit trail/error/attempt/retry history (new LLM
+    activity is charged only to the child), inherits the parent's cost
+    ceiling as its own default and its normalized ``excluded_db_ids``, and
+    copies the parent's current question snapshots + ``category_history`` so
+    later same-category uniqueness context and DB-replacement exclusions
+    carry over automatically.
+    """
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise JobBusy("another exam-generation operation is already running")
+    got_file_lock = False
+    try:
+        parent = store.load(job_id)
+        if parent is None:
+            raise JobError(f"job {job_id} not found")
+        if parent.status != "completed":
+            raise JobConflict(
+                "ניתן ליצור גרסה חדשה רק ממבחן שהושלם במלואו"
+            )
+        got_file_lock = store.try_acquire_lock(job_id)
+        if not got_file_lock:
+            raise JobBusy("job is locked by another process")
+
+        try:
+            identity = naming.resolve_identity(identity_payload)
+        except naming.IdentityError as exc:
+            raise JobError(str(exc)) from exc
+
+        new_slots = []
+        for s in parent.slots:
+            if s.status != "accepted" or not s.question:
+                continue  # a completed job has none of these, kept defensive
+            new_slots.append(Slot(
+                slot_id=new_id(), instance_id=new_id(), category=s.category,
+                context_id=s.context_id, kind=s.kind, order_in_category=s.order_in_category,
+                number=s.number, status="accepted", attempts=0, retries=0,
+                safe_error=None, question=dict(s.question), db_id=s.db_id,
+                audit_ref=None, was_repaired=False, analytics=dict(s.analytics),
+            ))
+        new_categories = [
+            CategoryPlan(
+                category=c.category, context_id=c.context_id, order_index=c.order_index,
+                total=c.total, database=c.database, llm=c.llm, number_base=c.number_base,
+                db_selected_ids=list(c.db_selected_ids),
+            )
+            for c in parent.categories
+        ]
+        child = Job(
+            job_id=new_id(),
+            status="completed",
+            cost_ceiling_usd=parent.cost_ceiling_usd,
+            accumulated_cost_usd="0",
+            cost_basis="none",
+            request=dict(parent.request),
+            categories=new_categories,
+            slots=new_slots,
+            category_history={k: [dict(h) for h in v] for k, v in parent.category_history.items()},
+            cost_ledger=[],
+            pricing_verification={},
+            warnings=[],
+            terminal_summary=None,
+            safe_error=None,
+            identity=identity,
+            excluded_db_ids=list(parent.excluded_db_ids),
+            parent_job_id=parent.job_id,
+            root_job_id=parent.root_job_id or parent.job_id,
+        )
+        store.save(child)
+        return child
+    finally:
+        if got_file_lock:
+            store.release_lock(job_id)
+        _RUN_LOCK.release()
 
 
 def _db_slot_dto(slot: Slot) -> ExamQuestionDTO:

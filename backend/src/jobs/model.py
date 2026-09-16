@@ -184,6 +184,22 @@ class Job:
     terminal_summary: Optional[dict] = None
     safe_error: Optional[str] = None
 
+    #: WP26 §1 -- structured/custom naming. ``None`` on every pre-WP26 job and
+    #: on a WP26 job created without an identity payload; both cases fall back
+    #: to ``naming.fallback_label`` wherever a display name is needed. Never
+    #: derive storage paths from it -- ``job_id`` remains authoritative.
+    identity: Optional[dict] = None
+
+    #: WP26 §2-§3 -- normalized, deduplicated DB question ids this job (and
+    #: every descendant branch) must never select or replace in. Empty list on
+    #: every pre-WP26 job (never rewritten merely to add this field).
+    excluded_db_ids: list = field(default_factory=list)
+
+    #: WP26 §4 -- lineage. ``None``/``job_id`` (itself) on every job that was
+    #: not created by branching.
+    parent_job_id: Optional[str] = None
+    root_job_id: Optional[str] = None
+
     # ----- helpers -------------------------------------------------------
     def touch(self) -> None:
         self.updated_utc = now_iso()
@@ -243,12 +259,17 @@ class Job:
             "warnings": self.warnings,
             "terminal_summary": self.terminal_summary,
             "safe_error": self.safe_error,
+            "identity": self.identity,
+            "excluded_db_ids": list(self.excluded_db_ids),
+            "parent_job_id": self.parent_job_id,
+            "root_job_id": self.root_job_id,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Job":
+        job_id = d["job_id"]
         return cls(
-            job_id=d["job_id"],
+            job_id=job_id,
             schema=d.get("schema", SCHEMA_VERSION),
             status=d.get("status", "queued"),
             created_utc=d.get("created_utc", now_iso()),
@@ -265,6 +286,12 @@ class Job:
             warnings=d.get("warnings", []),
             terminal_summary=d.get("terminal_summary"),
             safe_error=d.get("safe_error"),
+            # WP26: absent on every pre-WP26 job -- calculated fallback only,
+            # never backfilled onto the persisted file.
+            identity=d.get("identity"),
+            excluded_db_ids=list(d.get("excluded_db_ids", []) or []),
+            parent_job_id=d.get("parent_job_id"),
+            root_job_id=d.get("root_job_id") or job_id,
         )
 
     # ----- progress view for the API ---------------------------------

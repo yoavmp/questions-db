@@ -46,12 +46,43 @@ export async function createJob(payload) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  return jsonOrThrow(resp) // { job_id, status, url }
+  return jsonOrThrow(resp) // { job_id, status, url, display_name, slug }
 }
 
 export async function fetchJob(jobId) {
   const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}`)
   return jsonOrThrow(resp) // full result_view
+}
+
+// WP26 §1 -- every persisted job, newest-first, safe list fields only.
+export async function fetchJobsList() {
+  const resp = await fetch(`${API_BASE_URL}/exam-jobs`)
+  const body = await jsonOrThrow(resp)
+  return body.jobs || []
+}
+
+// WP26 §4 -- branch a completed saved exam into a new editable job. The
+// parent is never mutated; `identity` is the same structured/custom shape
+// `createJob` accepts.
+export async function branchJob(jobId, identity) {
+  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identity }),
+  })
+  return jsonOrThrow(resp)
+}
+
+// WP26 §2 -- local, non-provider preview/resolve of an optional exclusion
+// workbook. Never persists the uploaded bytes.
+export async function previewExclusionFile(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  const resp = await fetch(`${API_BASE_URL}/exam-jobs/exclusions/preview`, {
+    method: 'POST',
+    body: formData,
+  })
+  return jsonOrThrow(resp)
 }
 
 export async function retrySlot(jobId, slotId) {

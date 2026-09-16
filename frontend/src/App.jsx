@@ -929,27 +929,69 @@ function AboutSection() {
       <CardContent>
         <div className="space-y-4 hebrew-text">
           <div>
-            <h3 className="font-semibold mb-2">מערכת היברידית אמינה</h3>
+            <h3 className="font-semibold mb-2">מטרת מאגר השאלות</h3>
             <p className="text-gray-600">
-              המערכת משלבת שאלות מוטמעות (תמיד זמינות) עם יכולת העלאה של שאלות חדשות.
-              השאלות המוטמעות נטענות מיידית ולא תלויות בחיבור לשרת.
+              המערכת משמשת את צוות ההוראה בקורס מבנה המוח לניהול מאגר שאלות
+              אמריקאיות מרכזי, לעיון ולסינון השאלות לפי נושא, ולבניית מבחנים
+              המשלבים שאלות מהמאגר עם שאלות חדשות שנוצרות באמצעות בינה
+              מלאכותית מבוססת-הקשר.
             </p>
           </div>
-          
+
           <div>
-            <h3 className="font-semibold mb-2">יתרונות המערכת</h3>
-            <ul className="list-disc list-inside text-gray-600 space-y-1">
-              <li>אמינות מלאה - השאלות המוטמעות תמיד זמינות</li>
-              <li>מהירות טעינה - גישה מיידית לכל השאלות</li>
-              <li>גמישות - אפשרות להוסיף שאלות חדשות</li>
-              <li>תמיכה מלאה בעברית וכיוון RTL</li>
-            </ul>
+            <h3 className="font-semibold mb-2">עיון וייבוא שאלות</h3>
+            <p className="text-gray-600">
+              ניתן לעיין בכל שאלות המאגר לפי נושא ולחפש בטקסט השאלה או
+              בתשובות, ולייבא שאלות חדשות מקובץ Excel במבנה הקבוע. שאלה
+              שנוצרה על ידי בינה מלאכותית עבור מבחן מסוים אינה נכנסת למאגר
+              באופן אוטומטי -- הוספה למאגר נעשית רק ביבוא ידני נפרד.
+            </p>
           </div>
-          
+
           <div>
-            <h3 className="font-semibold mb-2">מבנה קובץ CSV להעלאה</h3>
-            <p className="text-gray-600 text-sm">
-              הקובץ צריך לכלול עמודות: קטגוריה, שאלה, תשובה1, תשובה2, תשובה3, תשובה4, תשובה_נכונה
+            <h3 className="font-semibold mb-2">מדדי ביצוע</h3>
+            <p className="text-gray-600">
+              לכל שאלה מהמאגר ניתן לצרף היסטוריית דיוק והבחנה ממבחנים
+              קודמים; שאלה שטרם נבחנה, וכל שאלה שנוצרה בבינה מלאכותית,
+              מוצגות ללא נתונים ("N/A") ולא כאפס.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="font-semibold mb-2">בניית מבחן משולב</h3>
+            <p className="text-gray-600">
+              בעת יצירת מבחן נבחר לכל נושא כמה שאלות יגיעו מהמאגר וכמה
+              ייווצרו בבינה מלאכותית. כל שאלה שנוצרה או נבחרה עוברת אפשרות
+              של בדיקה חוזרת/החלפה בטרם המבחן ננעל, כדי לאפשר סקירה
+              אקדמית אנושית לפני שימוש בכיתה.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="font-semibold mb-2">היסטוריית מבחנים וגרסאות</h3>
+            <p className="text-gray-600">
+              מבחנים שנבנו נשמרים בהיסטוריה עם שם וזמן יצירה, וניתן לפתוח
+              מבחן ישן לצפייה בלבד. כדי לערוך גרסה של מבחן ישן מבלי לשנות
+              אותו, ניתן ליצור ממנו "גרסה חדשה" -- מבחן חדש ונפרד שמתחיל
+              מהשאלות הקיימות, ללא עלות בינה מלאכותית קודמת.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="font-semibold mb-2">החרגת שאלות מהמאגר (אופציונלי)</h3>
+            <p className="text-gray-600">
+              ניתן להעלות, בעת יצירת מבחן, רשימת שאלות מהמאגר להחרגה
+              (לדוגמה שאלות שנפסלו מסיבות ניסוח או היסטוריה) -- שאלות אלה
+              לא ייבחרו במבחן זה ובגרסאות שיסתעפו ממנו.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="font-semibold mb-2">ייצוא</h3>
+            <p className="text-gray-600">
+              ניתן לייצא מבחן שנבנה לקובץ Word (עם או בלי תשובות) ולקובץ
+              Excel -- הן ברשימת השאלות שנוצרו בבינה מלאכותית בלבד (לשימוש
+              עתידי) והן כמבחן המלא הנוכחי.
             </p>
           </div>
         </div>
@@ -969,21 +1011,24 @@ function App() {
   // All questions are now uploaded questions
   const allQuestions = uploadedQuestions
 
-  // Calculate categories from all questions
-  const categories = React.useMemo(() => {
-    const categoryMap = {}
-    allQuestions.forEach(q => {
-      if (!categoryMap[q.category]) {
-        categoryMap[q.category] = 0
+  // WP26 §6 -- the topic bar must render categories byte-for-byte in the
+  // authoritative order from backend/src/utils/category_order.py::CATEGORY_ORDER,
+  // never alphabetized and never re-derived from question insertion order.
+  // `/api/test/categories` already returns exactly that (see
+  // src/routes/test_generation.py), with live counts.
+  const [categories, setCategories] = useState([])
+
+  const fetchCanonicalCategories = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/test/categories`)
+      if (response.ok) {
+        const data = await response.json()
+        setCategories(Array.isArray(data) ? data : [])
       }
-      categoryMap[q.category]++
-    })
-    
-    return Object.entries(categoryMap).map(([name, count]) => ({
-      name,
-      question_count: count
-    }))
-  }, [allQuestions])
+    } catch (error) {
+      console.log('Could not fetch canonical category order')
+    }
+  }
 
   // Filter and sort questions
   const filteredQuestions = React.useMemo(() => {
@@ -1083,11 +1128,13 @@ function App() {
     } catch (error) {
       console.log('Could not fetch uploaded questions from backend')
     }
+    fetchCanonicalCategories()
   }
 
-  // Try to load uploaded questions on mount
+  // Try to load uploaded questions + the canonical topic order on mount
   useEffect(() => {
     handleUploadSuccess()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Editing functions
@@ -1106,6 +1153,7 @@ function App() {
           delete newAnswers[questionId]
           return newAnswers
         })
+        fetchCanonicalCategories()
       } else {
         const error = await response.json()
         alert(error.error || 'שגיאה במחיקת השאלה')
@@ -1195,13 +1243,14 @@ function App() {
       
       if (response.ok) {
         // Update all questions with the old category name
-        setUploadedQuestions(prev => 
-          prev.map(q => 
-            q.category === oldCategoryName 
+        setUploadedQuestions(prev =>
+          prev.map(q =>
+            q.category === oldCategoryName
               ? { ...q, category: newCategoryName }
               : q
           )
         )
+        fetchCanonicalCategories()
       } else {
         const error = await response.json()
         alert(error.error || 'שגיאה בעדכון שם הנושא')
@@ -1323,7 +1372,7 @@ function App() {
           <div className="flex items-center gap-3">
             <BookOpen className="w-8 h-8 text-blue-600" />
             <h1 className="text-3xl font-bold hebrew-text">
-              מאגר שאלות בחינה בעברית
+              מאגר שאלות ומחולל בחינות – קורס מבנה המוח, אוניברסיטת תל אביב
             </h1>
           </div>
         </div>
@@ -1331,9 +1380,13 @@ function App() {
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         <Tabs defaultValue="questions" className="w-full">
+          {/* WP26 §6: visual RTL order must put אודות המערכת at the far
+              right and עיון בשאלות at the far left, with the two middle
+              tabs preserved in their existing (logical) order. DOM order
+              here IS the visual right-to-left tab order (dir="rtl"). */}
           <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="questions" className="hebrew-text">
-              עיון בשאלות
+            <TabsTrigger value="about" className="hebrew-text">
+              אודות המערכת
             </TabsTrigger>
             <TabsTrigger value="upload" className="hebrew-text">
               העלאת שאלות
@@ -1341,8 +1394,8 @@ function App() {
             <TabsTrigger value="test-generation" className="hebrew-text">
               יצירת מבחן
             </TabsTrigger>
-            <TabsTrigger value="about" className="hebrew-text">
-              אודות המערכת
+            <TabsTrigger value="questions" className="hebrew-text">
+              עיון בשאלות
             </TabsTrigger>
           </TabsList>
 

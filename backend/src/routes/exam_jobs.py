@@ -43,6 +43,13 @@ def readiness():
     return jsonify(readiness_report())
 
 
+@exam_jobs_bp.route("/exam-jobs", methods=["GET"])
+def list_jobs():
+    """WP26 §1: every persisted job, newest-first, safe list-view fields
+    only (no question bodies/prompts/audits/course-source content)."""
+    return jsonify({"jobs": service.list_jobs()})
+
+
 @exam_jobs_bp.route("/exam-jobs", methods=["POST"])
 def create_job():
     payload = request.get_json(silent=True)
@@ -69,8 +76,26 @@ def create_job():
         "job_id": job.job_id,
         "status": "queued",
         "url": url_for("exam_jobs.get_job", job_id=job.job_id, _external=False),
+        "display_name": job.identity["display_name"] if job.identity else None,
+        "slug": job.identity["slug"] if job.identity else None,
     }
     return jsonify(body), 202
+
+
+@exam_jobs_bp.route("/exam-jobs/<job_id>/branch", methods=["POST"])
+def branch_job(job_id):
+    """WP26 §4: create a new editable job from a completed saved exam. The
+    parent is never mutated on success or failure."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        child = service.branch_job(job_id, payload.get("identity"))
+    except service.JobError as exc:
+        return _err(str(exc), 404 if "not found" in str(exc) else 400)
+    except service.JobBusy as exc:
+        return _err(str(exc), 409)
+    except service.JobConflict as exc:
+        return _err(str(exc), 409)
+    return jsonify(service.result_view(child)), 201
 
 
 def _run_bg(job_id, provider_factory):

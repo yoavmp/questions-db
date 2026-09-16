@@ -386,3 +386,122 @@ export function syncJobIdToUrl(id) {
     /* no History API (very old browsers / SSR) */
   }
 }
+
+// --- viewed-job persistence (WP26 §5) --------------------------------
+// Kept separate from the active-editable job id above: opening an older
+// (historical) job for read-only viewing must not change which job is
+// active/editable, and both must independently survive a tab switch or
+// browser/app restart.
+
+const VIEWED_LS_KEY = 'examJob.viewedId'
+const VIEWED_URL_PARAM = 'viewJob'
+
+export function saveViewedJobId(id) {
+  try {
+    if (id) window.localStorage.setItem(VIEWED_LS_KEY, id)
+    else window.localStorage.removeItem(VIEWED_LS_KEY)
+  } catch {
+    /* private mode / storage disabled */
+  }
+}
+
+export function loadViewedJobId() {
+  let fromUrl = null
+  try {
+    fromUrl = new URLSearchParams(window.location.search).get(VIEWED_URL_PARAM)
+  } catch {
+    fromUrl = null
+  }
+  if (fromUrl) return fromUrl
+  try {
+    return window.localStorage.getItem(VIEWED_LS_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function syncViewedJobIdToUrl(id) {
+  try {
+    const url = new URL(window.location.href)
+    if (id) url.searchParams.set(VIEWED_URL_PARAM, id)
+    else url.searchParams.delete(VIEWED_URL_PARAM)
+    window.history.replaceState(window.history.state, '', url)
+  } catch {
+    /* no History API (very old browsers / SSR) */
+  }
+}
+
+// --- exam identity: structured / custom naming (WP26 §1, §5) -------
+
+export const COURSE_CHOICES = ['מבנה המוח', 'נוירואנטומיה']
+export const EXAM_TYPE_CHOICES = ['מבחן אמצע', 'מבחן מסכם']
+export const DEFAULT_SITTING = 'א'
+
+// The browser's own clock, exactly once per fresh dialog -- never re-derived
+// mid-edit so a user's own edit is never silently overwritten.
+export function defaultYear() {
+  return String(new Date().getFullYear())
+}
+
+export function emptyIdentity() {
+  return {
+    mode: 'structured',
+    course: COURSE_CHOICES[0],
+    year: defaultYear(),
+    exam_type: EXAM_TYPE_CHOICES[0],
+    sitting: DEFAULT_SITTING,
+    custom_name: '',
+  }
+}
+
+// Example: { course: 'מבנה המוח', year: '2026', exam_type: 'מבחן מסכם',
+// sitting: 'א' } -> 'מבנה המוח 2026 מבחן מסכם מועד א'.
+export function structuredDisplayName({ course, year, exam_type, sitting }) {
+  return `${course} ${year} ${exam_type} מועד ${sitting}`
+}
+
+// Every reason the identity form cannot yet be submitted; empty = ready.
+// Mirrors the backend's own validation (naming.py) so a bad value is caught
+// before the request round-trip -- the backend still re-validates
+// authoritatively.
+export function identityBlockers(identity) {
+  const blockers = []
+  if (!identity || identity.mode === 'structured') {
+    const course = identity?.course
+    const year = String(identity?.year ?? '').trim()
+    const examType = identity?.exam_type
+    const sitting = String(identity?.sitting ?? '').trim()
+    if (!COURSE_CHOICES.includes(course)) blockers.push('יש לבחור קורס')
+    if (!/^\d{4}$/.test(year)) blockers.push('שנה חייבת להיות מספר בן 4 ספרות')
+    if (!EXAM_TYPE_CHOICES.includes(examType)) blockers.push('יש לבחור סוג מבחן')
+    if (!sitting) blockers.push('יש להזין מועד')
+  } else if (identity.mode === 'custom') {
+    if (!String(identity.custom_name ?? '').trim()) {
+      blockers.push('יש להזין שם חופשי למבחן')
+    }
+  } else {
+    blockers.push('יש לבחור סוג שם (מובנה או חופשי)')
+  }
+  return blockers
+}
+
+// The exact wire shape `POST /api/exam-jobs` and `POST /exam-jobs/:id/branch`
+// expect for their `identity` field.
+export function buildIdentityPayload(identity) {
+  if (identity.mode === 'custom') {
+    return { mode: 'custom', custom_name: String(identity.custom_name ?? '').trim() }
+  }
+  return {
+    mode: 'structured',
+    course: identity.course,
+    year: String(identity.year ?? '').trim(),
+    exam_type: identity.exam_type,
+    sitting: String(identity.sitting ?? '').trim() || DEFAULT_SITTING,
+  }
+}
+
+// A safe, readable label for one entry of the saved-exam selector.
+export function jobListLabel(job) {
+  const date = (job.created_utc || '').slice(0, 10)
+  return `${job.display_name} — ${date} — ${(job.job_id || '').slice(0, 8)}`
+}

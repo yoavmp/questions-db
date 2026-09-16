@@ -9,18 +9,33 @@ import {
 } from '@/components/ui/card.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Input } from '@/components/ui/input.jsx'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog.jsx'
 
 import {
+  COURSE_CHOICES,
   DEFAULT_COST_CEILING_USD,
   DEFAULT_DISTINCTION_THRESHOLD,
+  EXAM_TYPE_CHOICES,
   applyRowEdit,
   buildCreatePayload,
+  buildIdentityPayload,
+  emptyIdentity,
   emptyRow,
   formatMeasure,
   formatUSD,
   groupByCategory,
+  identityBlockers,
   isPollingStatus,
+  jobListLabel,
   loadActiveJobId,
+  loadViewedJobId,
   orderQuestions,
   overallAnalytics,
   parseCeiling,
@@ -28,10 +43,13 @@ import {
   retryableSlots,
   rowNumbers,
   saveActiveJobId,
+  saveViewedJobId,
   slotAttemptCounts,
   slotAttemptCountsByInstance,
   startBlockers,
+  structuredDisplayName,
   syncJobIdToUrl,
+  syncViewedJobIdToUrl,
   validateRow,
 } from '@/lib/examGen.js'
 import * as api from '@/lib/examApi.js'
@@ -69,6 +87,202 @@ function OriginBadge({ origin }) {
     <Badge variant="secondary" className="hebrew-text">
       מתוך המאגר
     </Badge>
+  )
+}
+
+// --------------------------------------------------------------------------- //
+// exam identity form (structured / custom) -- WP26 §1, §5
+// --------------------------------------------------------------------------- //
+function IdentityForm({ identity, onChange }) {
+  const set = (field, value) => onChange({ ...identity, [field]: value })
+  return (
+    <div className="space-y-3 p-3 border rounded-lg">
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant={identity.mode === 'structured' ? 'default' : 'outline'}
+          className="hebrew-text"
+          onClick={() => set('mode', 'structured')}
+        >
+          שם מובנה
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={identity.mode === 'custom' ? 'default' : 'outline'}
+          className="hebrew-text"
+          onClick={() => set('mode', 'custom')}
+        >
+          שם חופשי
+        </Button>
+      </div>
+
+      {identity.mode === 'custom' ? (
+        <div className="space-y-1">
+          <label className="hebrew-text text-sm font-medium" htmlFor="custom-name">
+            שם המבחן
+          </label>
+          <Input
+            id="custom-name"
+            value={identity.custom_name}
+            onChange={(e) => set('custom_name', e.target.value)}
+            className="hebrew-text"
+            placeholder="לדוגמה: מבחן תרגול פנימי"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="hebrew-text text-sm font-medium" htmlFor="identity-course">
+              קורס
+            </label>
+            <select
+              id="identity-course"
+              value={identity.course}
+              onChange={(e) => set('course', e.target.value)}
+              className="w-full px-3 py-2 border rounded-md hebrew-text text-sm"
+            >
+              {COURSE_CHOICES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="hebrew-text text-sm font-medium" htmlFor="identity-year">
+              שנה
+            </label>
+            <Input
+              id="identity-year"
+              value={identity.year}
+              onChange={(e) => set('year', e.target.value)}
+              className="text-center"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="hebrew-text text-sm font-medium" htmlFor="identity-exam-type">
+              סוג
+            </label>
+            <select
+              id="identity-exam-type"
+              value={identity.exam_type}
+              onChange={(e) => set('exam_type', e.target.value)}
+              className="w-full px-3 py-2 border rounded-md hebrew-text text-sm"
+            >
+              {EXAM_TYPE_CHOICES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="hebrew-text text-sm font-medium" htmlFor="identity-sitting">
+              מועד
+            </label>
+            <Input
+              id="identity-sitting"
+              value={identity.sitting}
+              onChange={(e) => set('sitting', e.target.value)}
+              className="text-center"
+            />
+          </div>
+          <p className="hebrew-text text-sm text-gray-500 sm:col-span-2" data-testid="identity-preview">
+            שם המבחן: {structuredDisplayName(identity)}
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// --------------------------------------------------------------------------- //
+// optional exclusion workbook -- WP26 §2
+// --------------------------------------------------------------------------- //
+function ExclusionUpload({ file, preview, error, loading, onFileChange, onClear }) {
+  return (
+    <div className="space-y-2 p-3 border rounded-lg">
+      <label className="hebrew-text font-medium text-sm block" htmlFor="exclusion-file">
+        קובץ שאלות להחרגה (אופציונלי)
+      </label>
+      <div className="flex items-center gap-2">
+        <input
+          id="exclusion-file"
+          type="file"
+          accept=".xlsx"
+          onChange={(e) => onFileChange(e.target.files?.[0] || null)}
+          className="hebrew-text text-sm"
+        />
+        {file && (
+          <Button type="button" variant="outline" size="sm" className="hebrew-text" onClick={onClear}>
+            נקה
+          </Button>
+        )}
+      </div>
+      {loading && <p className="hebrew-text text-sm text-gray-500">בודק קובץ...</p>}
+      {error && (
+        <p role="alert" className="hebrew-text text-sm text-red-600">
+          {error}
+        </p>
+      )}
+      {preview && (
+        <div className="hebrew-text text-sm text-gray-700 space-y-1" data-testid="exclusion-preview">
+          <p>
+            קובץ: {file?.name}. הוחרגו {preview.counts.deduplicated} שאלות ייחודיות
+            {preview.counts.unresolved > 0 ? `, ${preview.counts.unresolved} שורות לא זוהו` : ''}
+            {preview.counts.ambiguous > 0 ? `, ${preview.counts.ambiguous} שורות עמומות` : ''}.
+          </p>
+          {preview.warnings.map((w, i) => (
+            <p key={i} className="text-yellow-700">
+              ⚠ {w}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// --------------------------------------------------------------------------- //
+// saved-exam selector -- WP26 §5
+// --------------------------------------------------------------------------- //
+function SavedExamSelector({ jobs, viewedJobId, onOpen }) {
+  if (!jobs || jobs.length === 0) return null
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="hebrew-text">מבחנים שמורים</CardTitle>
+        <CardDescription className="hebrew-text">
+          כל המבחנים, כולל שלא הושלמו במלואם. פתיחת מבחן ישן היא לצפייה בלבד.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2" data-testid="saved-exam-list">
+          {jobs.map((j) => (
+            <div
+              key={j.job_id}
+              className={`flex items-center justify-between gap-2 p-2 border rounded hebrew-text text-sm ${
+                j.job_id === viewedJobId ? 'bg-blue-50 border-blue-300' : ''
+              }`}
+            >
+              <span>
+                {jobListLabel(j)} · {STATUS_LABEL[j.status] || j.status}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="hebrew-text"
+                onClick={() => onOpen(j.job_id)}
+              >
+                פתח
+              </Button>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -136,11 +350,12 @@ function CategoryInputs({ categories, rows, onEdit }) {
 // --------------------------------------------------------------------------- //
 // progress
 // --------------------------------------------------------------------------- //
-function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating }) {
+function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating, readOnly }) {
   return (
     <div className="flex flex-wrap gap-2">
       {slots.map((slot) => {
         const retryable =
+          !readOnly &&
           slot.kind === 'llm' &&
           ['failed', 'interrupted', 'cost_ceiling'].includes(slot.status)
         // ledger-derived, not the mutable (rollback-prone) slot counters (§6);
@@ -201,7 +416,7 @@ function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating }) {
 // --------------------------------------------------------------------------- //
 // result question
 // --------------------------------------------------------------------------- //
-function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onReplaceLlm }) {
+function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onReplaceLlm, readOnly }) {
   const [showAnswer, setShowAnswer] = useState(false)
   const answers = [q.answer1, q.answer2, q.answer3, q.answer4]
   // ledger-derived, not q.generation_meta's mutable slot counters (§6) -- a
@@ -250,24 +465,28 @@ function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onRep
         >
           {showAnswer ? 'הסתר תשובה' : 'הצג תשובה נכונה'}
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="hebrew-text"
-          disabled={disabled}
-          onClick={() => onReplaceDb(q.instance_id)}
-        >
-          {isMutating ? 'מחליף...' : 'החלף בשאלה מהמאגר'}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="hebrew-text"
-          disabled={disabled}
-          onClick={() => onReplaceLlm(q.instance_id)}
-        >
-          {isMutating ? 'יוצר...' : 'צור שאלה אחרת'}
-        </Button>
+        {!readOnly && (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              className="hebrew-text"
+              disabled={disabled}
+              onClick={() => onReplaceDb(q.instance_id)}
+            >
+              {isMutating ? 'מחליף...' : 'החלף בשאלה מהמאגר'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="hebrew-text"
+              disabled={disabled}
+              onClick={() => onReplaceLlm(q.instance_id)}
+            >
+              {isMutating ? 'יוצר...' : 'צור שאלה אחרת'}
+            </Button>
+          </>
+        )}
         {attempts > 0 && (
           <span className="text-xs text-gray-500">
             ניסיונות: {attempts}
@@ -292,8 +511,19 @@ export default function ExamGenerationSection() {
   const [readiness, setReadiness] = useState(null)
   const [rows, setRows] = useState({})
   const [ceiling, setCeiling] = useState(DEFAULT_COST_CEILING_USD)
+  const [identity, setIdentity] = useState(emptyIdentity())
 
-  const [jobId, setJobId] = useState(null)
+  const [exclusionFile, setExclusionFile] = useState(null)
+  const [exclusionPreview, setExclusionPreview] = useState(null)
+  const [exclusionError, setExclusionError] = useState('')
+  const [exclusionLoading, setExclusionLoading] = useState(false)
+
+  const [jobsList, setJobsList] = useState([])
+
+  // WP26 §5 -- the active editable job and the job currently being viewed are
+  // kept as separate local state; they may be the same job or not.
+  const [activeJobId, setActiveJobId] = useState(null)
+  const [viewedJobId, setViewedJobId] = useState(null)
   const [job, setJob] = useState(null)
   const [error, setError] = useState('')
 
@@ -304,9 +534,21 @@ export default function ExamGenerationSection() {
   const [raisingCeiling, setRaisingCeiling] = useState(false)
   const [distinctionThreshold, setDistinctionThreshold] = useState(DEFAULT_DISTINCTION_THRESHOLD)
 
+  const [branchOpen, setBranchOpen] = useState(false)
+  const [branchIdentity, setBranchIdentity] = useState(emptyIdentity())
+  const [branching, setBranching] = useState(false)
+
   const startingRef = useRef(false)
 
-  // initial data + resume an active job
+  const refreshJobsList = useCallback(async () => {
+    try {
+      setJobsList(await api.fetchJobsList())
+    } catch {
+      /* the saved-exam selector simply stays empty */
+    }
+  }, [])
+
+  // initial data + resume the active job and the previously viewed job
   useEffect(() => {
     ;(async () => {
       try {
@@ -319,31 +561,41 @@ export default function ExamGenerationSection() {
       } catch (e) {
         setError(e.message || 'שגיאה בטעינת הנתונים')
       }
-      const resumeId = loadActiveJobId()
-      if (resumeId) {
-        setJobId(resumeId)
+      refreshJobsList()
+
+      const resumeActive = loadActiveJobId()
+      if (resumeActive) setActiveJobId(resumeActive)
+      const resumeViewed = loadViewedJobId() || resumeActive
+      if (resumeViewed) {
+        setViewedJobId(resumeViewed)
         try {
-          setJob(await api.fetchJob(resumeId))
+          setJob(await api.fetchJob(resumeViewed))
         } catch {
-          // stale id -> forget it
-          saveActiveJobId(null)
-          syncJobIdToUrl(null)
-          setJobId(null)
+          // stale id -> forget it, fall back to the builder
+          saveViewedJobId(null)
+          syncViewedJobIdToUrl(null)
+          setViewedJobId(null)
+          if (resumeViewed === resumeActive) {
+            saveActiveJobId(null)
+            syncJobIdToUrl(null)
+            setActiveJobId(null)
+          }
         }
       }
     })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // polling while the job is queued/running. We only poll once a status is
-  // known (set either by the resume fetch or by the optimistic placeholder
-  // handleStart installs) so a resumed terminal job never briefly polls.
+  const isReadOnly = !!viewedJobId && viewedJobId !== activeJobId
+
+  // polling while the ACTIVE job (and only the active job) is queued/running.
   useEffect(() => {
-    if (!jobId || !job) return undefined
+    if (isReadOnly || !viewedJobId || !job) return undefined
     if (!isPollingStatus(job.status)) return undefined
     let cancelled = false
     const tick = async () => {
       try {
-        const v = await api.fetchJob(jobId)
+        const v = await api.fetchJob(viewedJobId)
         if (!cancelled) setJob(v)
       } catch {
         /* transient - keep polling */
@@ -355,7 +607,7 @@ export default function ExamGenerationSection() {
       cancelled = true
       clearInterval(h)
     }
-  }, [jobId, job?.status])
+  }, [viewedJobId, job?.status, isReadOnly])
 
   const editRow = useCallback((name, field, value) => {
     setRows((prev) => ({
@@ -370,13 +622,45 @@ export default function ExamGenerationSection() {
     return m
   }, [categories])
 
-  const blockers = startBlockers({
-    rows,
-    availabilityByName,
-    ceilingRaw: ceiling,
-    readiness,
-  })
+  const blockers = [
+    ...identityBlockers(identity),
+    ...startBlockers({ rows, availabilityByName, ceilingRaw: ceiling, readiness }),
+  ]
   const warnings = pricingWarnings(readiness)
+
+  // --- exclusion workbook preview (§2) ---------------------------------
+  const handleExclusionFile = async (file) => {
+    setExclusionFile(file)
+    setExclusionPreview(null)
+    setExclusionError('')
+    if (!file) return
+    setExclusionLoading(true)
+    try {
+      const preview = await api.previewExclusionFile(file)
+      setExclusionPreview(preview)
+    } catch (e) {
+      setExclusionError(e.message || 'שגיאה בעיבוד הקובץ')
+    } finally {
+      setExclusionLoading(false)
+    }
+  }
+  const clearExclusion = () => {
+    setExclusionFile(null)
+    setExclusionPreview(null)
+    setExclusionError('')
+  }
+
+  const openViewed = async (id) => {
+    setError('')
+    saveViewedJobId(id)
+    syncViewedJobIdToUrl(id)
+    setViewedJobId(id)
+    try {
+      setJob(await api.fetchJob(id))
+    } catch (e) {
+      setError(e.message || 'שגיאה בטעינת המבחן')
+    }
+  }
 
   const handleStart = async () => {
     if (startingRef.current || blockers.length) return
@@ -384,11 +668,18 @@ export default function ExamGenerationSection() {
     setStarting(true)
     setError('')
     try {
-      const payload = buildCreatePayload(rows, categories, ceiling)
+      const payload = {
+        ...buildCreatePayload(rows, categories, ceiling),
+        identity: buildIdentityPayload(identity),
+        excluded_db_ids: exclusionPreview ? exclusionPreview.resolved_db_ids : [],
+      }
       const res = await api.createJob(payload)
       saveActiveJobId(res.job_id)
       syncJobIdToUrl(res.job_id)
-      setJobId(res.job_id)
+      setActiveJobId(res.job_id)
+      saveViewedJobId(res.job_id)
+      syncViewedJobIdToUrl(res.job_id)
+      setViewedJobId(res.job_id)
       // optimistic placeholder so the poller starts immediately
       setJob({
         status: res.status || 'queued',
@@ -400,7 +691,10 @@ export default function ExamGenerationSection() {
         accumulated_cost_usd: '0',
         remaining_cost_usd: payload.cost_ceiling_usd,
         cost_basis: 'none',
+        display_name: res.display_name,
+        slug: res.slug,
       })
+      refreshJobsList()
     } catch (e) {
       setError(e.message || 'שגיאה ביצירת המבחן')
     } finally {
@@ -409,16 +703,8 @@ export default function ExamGenerationSection() {
     }
   }
 
-  const refresh = async () => {
-    try {
-      setJob(await api.fetchJob(jobId))
-    } catch (e) {
-      setError(e.message || 'שגיאה ברענון')
-    }
-  }
-
   const withMutation = async (instanceId, fn) => {
-    if (mutating || retryingSlotId || raisingCeiling) return
+    if (isReadOnly || mutating || retryingSlotId || raisingCeiling) return
     setMutating(instanceId)
     setError('')
     try {
@@ -433,16 +719,16 @@ export default function ExamGenerationSection() {
   }
 
   const handleReplaceDb = (iid) =>
-    withMutation(iid, () => api.replaceFromDb(jobId, iid))
+    withMutation(iid, () => api.replaceFromDb(viewedJobId, iid))
   const handleReplaceLlm = (iid) =>
-    withMutation(iid, () => api.replaceViaLlm(jobId, iid))
+    withMutation(iid, () => api.replaceViaLlm(viewedJobId, iid))
 
   const handleRetry = async (slotId) => {
-    if (mutating || retryingSlotId || raisingCeiling) return
+    if (isReadOnly || mutating || retryingSlotId || raisingCeiling) return
     setRetryingSlotId(slotId)
     setError('')
     try {
-      setJob(await api.retrySlot(jobId, slotId))
+      setJob(await api.retrySlot(viewedJobId, slotId))
     } catch (e) {
       setError(e.message || 'ניסיון חוזר נכשל')
     } finally {
@@ -451,12 +737,13 @@ export default function ExamGenerationSection() {
   }
 
   const handleRaiseCeiling = async () => {
+    if (isReadOnly) return
     const parsed = parseCeiling(newCeiling)
     if (!parsed.valid || raisingCeiling || mutating) return
     setRaisingCeiling(true)
     setError('')
     try {
-      setJob(await api.updateCostCeiling(jobId, parsed.value))
+      setJob(await api.updateCostCeiling(viewedJobId, parsed.value))
       setNewCeiling('')
     } catch (e) {
       setError(e.message || 'עדכון התקרה נכשל')
@@ -465,12 +752,45 @@ export default function ExamGenerationSection() {
     }
   }
 
+  // Back to the builder to set up a new exam. This never forgets the active
+  // editable job -- only actually creating a new job (handleStart) or a
+  // branch (handleBranch) replaces it (§5 owner decision).
   const handleNewExam = () => {
-    saveActiveJobId(null)
-    syncJobIdToUrl(null)
-    setJobId(null)
-    setJob(null)
     setError('')
+    saveViewedJobId(null)
+    syncViewedJobIdToUrl(null)
+    setViewedJobId(null)
+    setJob(null)
+    setIdentity(emptyIdentity())
+    clearExclusion()
+  }
+
+  const handleBranch = async () => {
+    if (branching || !viewedJobId) return
+    const missing = identityBlockers(branchIdentity)
+    if (missing.length) {
+      setError(missing[0])
+      return
+    }
+    setBranching(true)
+    setError('')
+    try {
+      const child = await api.branchJob(viewedJobId, buildIdentityPayload(branchIdentity))
+      saveActiveJobId(child.job_id)
+      syncJobIdToUrl(child.job_id)
+      setActiveJobId(child.job_id)
+      saveViewedJobId(child.job_id)
+      syncViewedJobIdToUrl(child.job_id)
+      setViewedJobId(child.job_id)
+      setJob(child)
+      setBranchOpen(false)
+      setBranchIdentity(emptyIdentity())
+      refreshJobsList()
+    } catch (e) {
+      setError(e.message || 'יצירת הגרסה החדשה נכשלה')
+    } finally {
+      setBranching(false)
+    }
   }
 
   const downloadDocx = async (includeAnswers) => {
@@ -479,8 +799,8 @@ export default function ExamGenerationSection() {
         orderQuestions(job.questions),
         includeAnswers,
       )
-      const ts = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
-      api.saveBlob(blob, `exam${includeAnswers ? '_answers' : ''}_${ts}.docx`)
+      const slug = job?.slug || 'exam'
+      api.saveBlob(blob, `${slug}${includeAnswers ? '_answers' : ''}.docx`)
     } catch (e) {
       setError(e.message || 'שגיאה בייצוא DOCX')
     }
@@ -488,8 +808,8 @@ export default function ExamGenerationSection() {
 
   const downloadXlsx = async () => {
     try {
-      const blob = await api.downloadGeneratedXlsx(jobId)
-      api.saveBlob(blob, `generated_questions_${jobId.slice(0, 8)}.xlsx`)
+      const blob = await api.downloadGeneratedXlsx(viewedJobId)
+      api.saveBlob(blob, `${job?.slug || 'exam'}_llm_only.xlsx`)
     } catch (e) {
       setError(e.message || 'שגיאה בייצוא Excel')
     }
@@ -497,8 +817,8 @@ export default function ExamGenerationSection() {
 
   const downloadFullXlsx = async () => {
     try {
-      const blob = await api.downloadFullExamXlsx(jobId)
-      api.saveBlob(blob, `full_exam_${jobId.slice(0, 8)}.xlsx`)
+      const blob = await api.downloadFullExamXlsx(viewedJobId)
+      api.saveBlob(blob, `${job?.slug || 'exam'}_full.xlsx`)
     } catch (e) {
       setError(e.message || 'שגיאה בייצוא Excel')
     }
@@ -507,69 +827,84 @@ export default function ExamGenerationSection() {
   // ------------------------------------------------------------------- //
   // render: builder
   // ------------------------------------------------------------------- //
-  if (!jobId) {
+  if (!viewedJobId) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="hebrew-text">יצירת מבחן</CardTitle>
-          <CardDescription className="hebrew-text">
-            בחר לכל נושא כמה שאלות בסך הכול, כמה מתוך המאגר וכמה ייוצרו בבינה
-            מלאכותית. עריכת סה"כ מחלקת אוטומטית בין השניים; עריכת אחד הצדדים
-            מעדכנת את הסה"כ.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {error && (
-            <p role="alert" className="hebrew-text text-red-600 bg-red-50 p-3 rounded">
-              {error}
-            </p>
-          )}
+      <div className="space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="hebrew-text">יצירת מבחן</CardTitle>
+            <CardDescription className="hebrew-text">
+              בחר לכל נושא כמה שאלות בסך הכול, כמה מתוך המאגר וכמה ייוצרו בבינה
+              מלאכותית. עריכת סה"כ מחלקת אוטומטית בין השניים; עריכת אחד הצדדים
+              מעדכנת את הסה"כ.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {error && (
+              <p role="alert" className="hebrew-text text-red-600 bg-red-50 p-3 rounded">
+                {error}
+              </p>
+            )}
 
-          <div className="space-y-2 max-w-xs">
-            <label className="hebrew-text font-medium text-sm" htmlFor="cost-ceiling">
-              תקרת עלות לכל המבחן (דולר)
-            </label>
-            <Input
-              id="cost-ceiling"
-              type="number"
-              min="0"
-              step="0.01"
-              value={ceiling}
-              onChange={(e) => setCeiling(e.target.value)}
-              className="text-center"
+            <IdentityForm identity={identity} onChange={setIdentity} />
+
+            <ExclusionUpload
+              file={exclusionFile}
+              preview={exclusionPreview}
+              error={exclusionError}
+              loading={exclusionLoading}
+              onFileChange={handleExclusionFile}
+              onClear={clearExclusion}
             />
-          </div>
 
-          {warnings.length > 0 && (
-            <div className="hebrew-text bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded space-y-1">
-              {warnings.map((w, i) => (
-                <p key={i}>⚠ {w}</p>
-              ))}
+            <div className="space-y-2 max-w-xs">
+              <label className="hebrew-text font-medium text-sm" htmlFor="cost-ceiling">
+                תקרת עלות לכל המבחן (דולר)
+              </label>
+              <Input
+                id="cost-ceiling"
+                type="number"
+                min="0"
+                step="0.01"
+                value={ceiling}
+                onChange={(e) => setCeiling(e.target.value)}
+                className="text-center"
+              />
             </div>
-          )}
 
-          <CategoryInputs categories={categories} rows={rows} onEdit={editRow} />
+            {warnings.length > 0 && (
+              <div className="hebrew-text bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded space-y-1">
+                {warnings.map((w, i) => (
+                  <p key={i}>⚠ {w}</p>
+                ))}
+              </div>
+            )}
 
-          {blockers.length > 0 && (
-            <div
-              className="hebrew-text bg-gray-50 border p-3 rounded text-sm text-gray-700 space-y-1"
-              data-testid="start-blockers"
+            <CategoryInputs categories={categories} rows={rows} onEdit={editRow} />
+
+            {blockers.length > 0 && (
+              <div
+                className="hebrew-text bg-gray-50 border p-3 rounded text-sm text-gray-700 space-y-1"
+                data-testid="start-blockers"
+              >
+                {blockers.map((b, i) => (
+                  <p key={i}>• {b}</p>
+                ))}
+              </div>
+            )}
+
+            <Button
+              className="w-full hebrew-text"
+              disabled={starting || blockers.length > 0}
+              onClick={handleStart}
             >
-              {blockers.map((b, i) => (
-                <p key={i}>• {b}</p>
-              ))}
-            </div>
-          )}
+              {starting ? 'יוצר מבחן...' : 'צור מבחן'}
+            </Button>
+          </CardContent>
+        </Card>
 
-          <Button
-            className="w-full hebrew-text"
-            disabled={starting || blockers.length > 0}
-            onClick={handleStart}
-          >
-            {starting ? 'יוצר מבחן...' : 'צור מבחן'}
-          </Button>
-        </CardContent>
-      </Card>
+        <SavedExamSelector jobs={jobsList} viewedJobId={viewedJobId} onOpen={openViewed} />
+      </div>
     )
   }
 
@@ -581,13 +916,14 @@ export default function ExamGenerationSection() {
   const questions = orderQuestions(job?.questions || [])
   const cats = job?.categories || {}
   const tel = job?.attempt_telemetry
-  const retryList = retryableSlots(job || {})
+  const retryList = isReadOnly ? [] : retryableSlots(job || {})
   const anyBusy = !!mutating || !!retryingSlotId || raisingCeiling
   // recomputed on every render straight from the current question list, so a
   // failed replacement (which never replaces `job`) leaves it unchanged and a
   // successful one is reflected immediately (§4)
   const stats = overallAnalytics(questions, distinctionThreshold)
   const groups = groupByCategory(questions)
+  const displayName = job?.display_name || 'מבחן'
 
   return (
     <div className="space-y-6">
@@ -597,21 +933,59 @@ export default function ExamGenerationSection() {
         </p>
       )}
 
+      {isReadOnly && (
+        <div
+          className="hebrew-text bg-blue-50 border border-blue-200 text-blue-900 p-3 rounded flex flex-wrap items-center justify-between gap-2"
+          data-testid="readonly-banner"
+        >
+          <span>צפייה במבחן שמור (לקריאה בלבד). לא ניתן לשנות שאלות במבחן זה.</span>
+          {job?.branchable && (
+            <Button
+              className="hebrew-text"
+              onClick={() => setBranchOpen(true)}
+              data-testid="branch-button"
+            >
+              יצירת גרסה חדשה
+            </Button>
+          )}
+        </div>
+      )}
+
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <CardTitle className="hebrew-text flex items-center gap-2">
-              מבחן
+              {displayName}
               <Badge className="hebrew-text" data-testid="job-status">
                 {STATUS_LABEL[status] || status}
               </Badge>
+              {isReadOnly && (
+                <Badge variant="outline" className="hebrew-text">
+                  לקריאה בלבד
+                </Badge>
+              )}
             </CardTitle>
-            <Button variant="outline" className="hebrew-text" onClick={handleNewExam}>
-              צור מבחן חדש
-            </Button>
+            <div className="flex items-center gap-2">
+              {!isReadOnly && job?.branchable && (
+                <Button
+                  variant="outline"
+                  className="hebrew-text"
+                  onClick={() => setBranchOpen(true)}
+                  data-testid="branch-button-active"
+                >
+                  יצירת גרסה חדשה
+                </Button>
+              )}
+              <Button variant="outline" className="hebrew-text" onClick={handleNewExam}>
+                צור מבחן חדש
+              </Button>
+            </div>
           </div>
           <CardDescription className="hebrew-text" data-testid="job-id">
-            מזהה עבודה: {jobId}
+            מזהה עבודה: {viewedJobId}
+            {job?.excluded_db_ids_count > 0 && (
+              <span> · {job.excluded_db_ids_count} שאלות מוחרגות מהמאגר</span>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -654,34 +1028,38 @@ export default function ExamGenerationSection() {
             </div>
           )}
 
-          {/* raise the ceiling, then retry */}
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="space-y-1">
-              <label className="hebrew-text text-sm text-gray-600" htmlFor="raise-ceiling">
-                העלאת תקרת העלות (דולר)
-              </label>
-              <Input
-                id="raise-ceiling"
-                type="number"
-                min="0"
-                step="0.01"
-                value={newCeiling}
-                onChange={(e) => setNewCeiling(e.target.value)}
-                className="w-32 text-center"
-                placeholder={job?.cost_ceiling_usd}
-              />
+          {/* raise the ceiling, then retry -- active job only */}
+          {!isReadOnly && (
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="space-y-1">
+                <label className="hebrew-text text-sm text-gray-600" htmlFor="raise-ceiling">
+                  העלאת תקרת העלות (דולר)
+                </label>
+                <Input
+                  id="raise-ceiling"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={newCeiling}
+                  onChange={(e) => setNewCeiling(e.target.value)}
+                  className="w-32 text-center"
+                  placeholder={job?.cost_ceiling_usd}
+                />
+              </div>
+              <Button
+                variant="outline"
+                className="hebrew-text"
+                disabled={raisingCeiling || anyBusy || !parseCeiling(newCeiling).valid}
+                onClick={handleRaiseCeiling}
+              >
+                {raisingCeiling ? 'מעדכן...' : 'עדכן תקרה'}
+              </Button>
             </div>
-            <Button
-              variant="outline"
-              className="hebrew-text"
-              disabled={raisingCeiling || anyBusy || !parseCeiling(newCeiling).valid}
-              onClick={handleRaiseCeiling}
-            >
-              {raisingCeiling ? 'מעדכן...' : 'עדכן תקרה'}
-            </Button>
-          </div>
+          )}
         </CardContent>
       </Card>
+
+      <SavedExamSelector jobs={jobsList} viewedJobId={viewedJobId} onOpen={openViewed} />
 
       {/* per-category / per-slot progress */}
       <Card>
@@ -712,10 +1090,11 @@ export default function ExamGenerationSection() {
                   onRetry={handleRetry}
                   retryingSlotId={retryingSlotId}
                   mutating={mutating}
+                  readOnly={isReadOnly}
                 />
               </div>
             ))}
-          {retryList.length === 0 && status !== 'completed' && (
+          {retryList.length === 0 && status !== 'completed' && !isReadOnly && (
             <p className="hebrew-text text-sm text-gray-500">
               אין כרגע משבצות הניתנות לניסיון חוזר.
             </p>
@@ -793,9 +1172,9 @@ export default function ExamGenerationSection() {
           <CardTitle className="hebrew-text">ייצוא</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="flex flex-wrap gap-3">
             <Button
-              className="hebrew-text"
+              className="hebrew-text whitespace-nowrap"
               disabled={questions.length === 0}
               onClick={() => downloadDocx(false)}
             >
@@ -803,7 +1182,7 @@ export default function ExamGenerationSection() {
             </Button>
             <Button
               variant="outline"
-              className="hebrew-text"
+              className="hebrew-text whitespace-nowrap"
               disabled={questions.length === 0}
               onClick={() => downloadDocx(true)}
             >
@@ -811,14 +1190,14 @@ export default function ExamGenerationSection() {
             </Button>
             <Button
               variant="outline"
-              className="hebrew-text"
+              className="hebrew-text whitespace-nowrap"
               onClick={downloadXlsx}
             >
               ייצוא שאלות בינה בלבד (Excel)
             </Button>
             <Button
               variant="outline"
-              className="hebrew-text"
+              className="hebrew-text whitespace-nowrap"
               disabled={questions.length === 0}
               onClick={downloadFullXlsx}
             >
@@ -838,8 +1217,9 @@ export default function ExamGenerationSection() {
         <CardHeader>
           <CardTitle className="hebrew-text">שאלות המבחן</CardTitle>
           <CardDescription className="hebrew-text">
-            כל שאלה מסומנת כמקורה במאגר או ביצירת בינה מלאכותית. שני הכפתורים
-            זמינים בכל שאלה שהתקבלה.
+            {isReadOnly
+              ? 'צפייה בלבד: לא ניתן להחליף שאלות במבחן שמור.'
+              : 'כל שאלה מסומנת כמקורה במאגר או ביצירת בינה מלאכותית. שני הכפתורים זמינים בכל שאלה שהתקבלה.'}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -864,6 +1244,7 @@ export default function ExamGenerationSection() {
                     isMutating={mutating === q.instance_id}
                     onReplaceDb={handleReplaceDb}
                     onReplaceLlm={handleReplaceLlm}
+                    readOnly={isReadOnly}
                   />
                 ))}
               </div>
@@ -871,6 +1252,27 @@ export default function ExamGenerationSection() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={branchOpen} onOpenChange={setBranchOpen}>
+        <DialogContent className="hebrew-text">
+          <DialogHeader>
+            <DialogTitle className="hebrew-text">יצירת גרסה חדשה</DialogTitle>
+            <DialogDescription className="hebrew-text">
+              המבחן המקורי לא ישתנה. הגרסה החדשה תתחיל ללא עלות בינה ותירש את
+              השאלות הנוכחיות וההחרגות.
+            </DialogDescription>
+          </DialogHeader>
+          <IdentityForm identity={branchIdentity} onChange={setBranchIdentity} />
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="hebrew-text" onClick={() => setBranchOpen(false)}>
+              ביטול
+            </Button>
+            <Button className="hebrew-text" disabled={branching} onClick={handleBranch}>
+              {branching ? 'יוצר גרסה...' : 'צור גרסה חדשה'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -98,6 +98,7 @@ def jobs_app(tmp_path, jobs_root):
     from src.models.user import db
     from src.models.question import Question
     from src.routes.exam_jobs import exam_jobs_bp
+    from src.routes.exclusion_upload import exclusion_bp
     from src.routes.test_generation import test_gen_bp
     from src.routes.upload import upload_bp
 
@@ -107,6 +108,7 @@ def jobs_app(tmp_path, jobs_root):
     application.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     application.config["TESTING"] = True
     application.register_blueprint(exam_jobs_bp, url_prefix="/api")
+    application.register_blueprint(exclusion_bp, url_prefix="/api")
     application.register_blueprint(test_gen_bp, url_prefix="/api")
     application.register_blueprint(upload_bp, url_prefix="/api")
 

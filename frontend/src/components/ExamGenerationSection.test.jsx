@@ -9,6 +9,9 @@ vi.mock('@/lib/examApi.js', () => ({
   fetchReadiness: vi.fn(),
   createJob: vi.fn(),
   fetchJob: vi.fn(),
+  fetchJobsList: vi.fn(),
+  branchJob: vi.fn(),
+  previewExclusionFile: vi.fn(),
   retrySlot: vi.fn(),
   updateCostCeiling: vi.fn(),
   replaceFromDb: vi.fn(),
@@ -130,6 +133,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   api.fetchCategories.mockResolvedValue(CATEGORIES)
   api.fetchReadiness.mockResolvedValue({ ready_for_llm: true, warnings: [], blocking_reasons: [] })
+  api.fetchJobsList.mockResolvedValue([])
 })
 
 // --------------------------------------------------------------------------- //
@@ -739,5 +743,134 @@ describe('WP21 - category headings, analytics, ledger-derived counts', () => {
     expect(screen.queryByText(/היסטוריה סמנטית פנימית/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('current-composition')).not.toBeInTheDocument()
     expect(screen.queryByText(/כרגע.*מהמאגר/)).not.toBeInTheDocument()
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// WP26: naming/history/branching/exclusions
+// --------------------------------------------------------------------------- //
+describe('WP26 - identity form, saved-exam history, read-only viewing, branching', () => {
+  it('builder shows the structured identity fields with a live display-name preview', async () => {
+    render(<ExamGenerationSection />)
+    await screen.findByLabelText('סה"כ שאלות עבור מבוא')
+    expect(screen.getByLabelText('קורס')).toBeInTheDocument()
+    expect(screen.getByLabelText('שנה')).toBeInTheDocument()
+    expect(screen.getByLabelText('סוג')).toBeInTheDocument()
+    expect(screen.getByLabelText('מועד')).toBeInTheDocument()
+    expect(screen.getByTestId('identity-preview')).toHaveTextContent(/מבנה המוח \d{4} מבחן אמצע מועד א/)
+  })
+
+  it('switching to a custom name blocks start until a name is entered', async () => {
+    const user = userEvent.setup()
+    render(<ExamGenerationSection />)
+    const total = await screen.findByLabelText('סה"כ שאלות עבור מבוא')
+    await user.clear(total)
+    await user.type(total, '4')
+    const db = screen.getByLabelText('שאלות מהמאגר עבור מבוא')
+    await user.clear(db)
+    await user.type(db, '4')
+    const llm = screen.getByLabelText('שאלות בבינה מלאכותית עבור מבוא')
+    await user.clear(llm)
+    await user.type(llm, '0')
+    expect(screen.getByRole('button', { name: 'צור מבחן' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: 'שם חופשי' }))
+    expect(screen.getByRole('button', { name: 'צור מבחן' })).toBeDisabled()
+    expect(screen.getByTestId('start-blockers')).toHaveTextContent('יש להזין שם חופשי למבחן')
+
+    await user.type(screen.getByLabelText('שם המבחן'), 'מבחן תרגול')
+    expect(screen.getByRole('button', { name: 'צור מבחן' })).toBeEnabled()
+  })
+
+  it('submits the identity and exclusion ids with job creation', async () => {
+    const user = userEvent.setup()
+    api.previewExclusionFile.mockResolvedValue({
+      resolved_db_ids: [7, 8], counts: { resolved: 2, deduplicated: 2, unresolved: 0, ambiguous: 0 }, warnings: [],
+    })
+    api.createJob.mockResolvedValue({ job_id: 'job-1', status: 'queued', display_name: 'מבנה המוח', slug: 'x' })
+    render(<ExamGenerationSection />)
+    const total = await screen.findByLabelText('סה"כ שאלות עבור מבוא')
+    await user.clear(total)
+    await user.type(total, '4')
+    await user.clear(screen.getByLabelText('שאלות בבינה מלאכותית עבור מבוא'))
+    await user.type(screen.getByLabelText('שאלות בבינה מלאכותית עבור מבוא'), '0')
+    await user.clear(screen.getByLabelText('שאלות מהמאגר עבור מבוא'))
+    await user.type(screen.getByLabelText('שאלות מהמאגר עבור מבוא'), '4')
+
+    const file = new File(['x'], 'excl.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const fileInput = screen.getByLabelText(/קובץ שאלות להחרגה/)
+    await user.upload(fileInput, file)
+    await screen.findByTestId('exclusion-preview')
+
+    api.fetchJob.mockResolvedValue(makeView({ job_id: 'job-1' }))
+    await user.click(screen.getByRole('button', { name: 'צור מבחן' }))
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalled())
+    const payload = api.createJob.mock.calls[0][0]
+    expect(payload.identity.mode).toBe('structured')
+    expect(payload.excluded_db_ids).toEqual([7, 8])
+  })
+
+  it('opening a saved exam from the selector shows it read-only and hides mutation controls', async () => {
+    api.fetchJobsList.mockResolvedValue([
+      { job_id: 'old-job', display_name: 'מבחן ישן', created_utc: '2026-01-01T00:00:00Z', status: 'completed' },
+    ])
+    api.fetchJob.mockResolvedValue(makeView({ job_id: 'old-job', branchable: true }))
+    const user = userEvent.setup()
+    render(<ExamGenerationSection />)
+    await screen.findByTestId('saved-exam-list')
+    await user.click(screen.getByRole('button', { name: 'פתח' }))
+
+    expect(await screen.findByTestId('readonly-banner')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'החלף בשאלה מהמאגר' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'צור שאלה אחרת' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('branch-button')).toBeInTheDocument()
+  })
+
+  it('branching a historical job creates a child, makes it active, and never mutates via a replacement route', async () => {
+    api.fetchJobsList.mockResolvedValue([
+      { job_id: 'old-job', display_name: 'מבחן ישן', created_utc: '2026-01-01T00:00:00Z', status: 'completed' },
+    ])
+    api.fetchJob.mockResolvedValue(makeView({ job_id: 'old-job', branchable: true }))
+    const user = userEvent.setup()
+    render(<ExamGenerationSection />)
+    await screen.findByTestId('saved-exam-list')
+    await user.click(screen.getByRole('button', { name: 'פתח' }))
+    await screen.findByTestId('readonly-banner')
+
+    await user.click(screen.getByTestId('branch-button'))
+    // switch the branch dialog's identity form to custom mode and name it
+    await user.click(await screen.findByRole('button', { name: 'שם חופשי' }))
+    await user.type(screen.getByLabelText('שם המבחן'), 'גרסה חדשה')
+
+    api.branchJob.mockResolvedValue(makeView({ job_id: 'new-job', parent_job_id: 'old-job', branchable: true }))
+    await user.click(screen.getByRole('button', { name: 'צור גרסה חדשה' }))
+
+    await waitFor(() => expect(api.branchJob).toHaveBeenCalledWith('old-job', { mode: 'custom', custom_name: 'גרסה חדשה' }))
+    expect(api.replaceFromDb).not.toHaveBeenCalled()
+    expect(api.replaceViaLlm).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByTestId('job-id')).toHaveTextContent('new-job'))
+    expect(screen.queryByTestId('readonly-banner')).not.toBeInTheDocument()
+  })
+
+  it('displays the exam display name and the excluded-question count', async () => {
+    window.localStorage.setItem('examJob.activeId', 'job-1')
+    api.fetchJob.mockResolvedValue(makeView({ display_name: 'מבנה המוח 2026 מבחן מסכם מועד א', excluded_db_ids_count: 3 }))
+    render(<ExamGenerationSection />)
+    await waitFor(() => expect(screen.getByTestId('job-status')).toHaveTextContent('הושלם'))
+    expect(screen.getByText('מבנה המוח 2026 מבחן מסכם מועד א')).toBeInTheDocument()
+    expect(screen.getByTestId('job-id')).toHaveTextContent('3 שאלות מוחרגות')
+  })
+
+  it('uses the exam slug for Excel export filenames', async () => {
+    const user = userEvent.setup()
+    window.localStorage.setItem('examJob.activeId', 'job-1')
+    api.fetchJob.mockResolvedValue(makeView({ slug: 'my_custom_slug' }))
+    render(<ExamGenerationSection />)
+    await waitFor(() => expect(screen.getByTestId('job-status')).toHaveTextContent('הושלם'))
+    api.downloadGeneratedXlsx.mockResolvedValue(new Blob(['x']))
+    await user.click(screen.getByRole('button', { name: 'ייצוא שאלות בינה בלבד (Excel)' }))
+    await waitFor(() => expect(api.saveBlob).toHaveBeenCalled())
+    expect(api.saveBlob.mock.calls[0][1]).toContain('my_custom_slug')
   })
 })

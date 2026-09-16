@@ -214,10 +214,25 @@ hebrew-exam-system/
 └── SETUP.md              # This file
 ```
 
+## Named Exams, History, Branches, and Exclusions - שמות מבחנים, היסטוריה, גרסאות והחרגות
+
+Since WP26, creating a new exam ("יצירת מבחן") asks for either a **structured
+name** (קורס / שנה / סוג / מועד) or a **custom name**, and optionally accepts
+an `.xlsx` file listing DB questions to exclude from selection (headers
+`מזהה_שאלה`/`id`, `שאלה`/`question`, `נושא`/`קטגוריה`/`category`) — the file
+itself is never stored, only the resolved question ids.
+
+Every created exam is saved to a history list (visible in the "יצירת מבחן"
+tab) showing its name, date, status and short id, regardless of whether it
+completed. Opening an older exam from that list is **read-only** — to keep
+working from it without changing the original, use "יצירת גרסה חדשה" to
+create an independent, editable branch that starts with the same questions
+and no prior LLM cost.
+
 ## Next Steps - צעדים הבאים
 
 1. **Upload Questions**: Use the Excel template to upload your questions
-2. **Create Tests**: Generate tests using the test creation interface
+2. **Create Tests**: Generate tests using the test creation interface, optionally naming them and excluding specific DB questions
 3. **Manage Performance**: Add performance data for questions used in exams
 4. **Export Data**: Export questions and test results to Excel
 
