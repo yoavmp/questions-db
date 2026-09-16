@@ -3,34 +3,44 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-14 · **Latest completed WP:** WP24 (final generator metadata fix + integrated
-release — offline only, no live/provider call, `OPENAI_API_KEY` never accessed). **WP24 is the
-functional release**: generator complete suite 999 collected/825 passed/174 skipped/0 failed, outer
-backend complete suite 121/121 passed, frontend complete suite 81/81 passed, frontend production build
-succeeded — all suites passed, 0 failures anywhere (`WPs/WP24_ARCHITECT_REPORT.md` §4).
-**Next:** none scheduled. WP24 closes the one gap WP23R's generator-side fix left open (a declared
-`concept_mentions.term_id` absent from the inventory was still a hard rejection even when the
-displayed public text was valid — now reconciled the same way an existing-but-wrong `term_id` was),
-then re-pins this outer repo's submodule gitlink to the pushed generator commit and updates
-`backend/src/integration/generator_pin.py::EXPECTED_GENERATOR_PIN` to match, closing the
-long-standing (WP21GR→WP22) known `submodule_pin` drift warning. The "יצירת מבחן" screen uses
-`/api/exam-jobs*` end to end, has been validated against a real local backend + real OpenAI
-generation (WP20: one small mixed job, $0.087 of a $1.00 authorized ceiling; WP22: one integrated
-job + two reviewer-only replays, $0.1624 of a $0.50 authorized ceiling), and carries the
-analytics/export/audit surface WP21 restored plus WP21R's telemetry-clarity and crash-safety
-hardening. WP24 made no live/provider call, so none of that live-validated state changed. The
-legacy synchronous `/api/test/generate` + `/api/test/replace-question` endpoints are **still
-present** (nothing on the current screen calls them) and may be retired by a later WP.
+**Updated:** 2026-09-16 · **Latest completed WP:** WP25G (inverse semantic duplicate guard — offline
+only, no live/provider call, `OPENAI_API_KEY` never accessed). Fixes the demonstrated uniqueness
+failure where an accepted question was replaced by another question testing the same fact with the
+stem and correct-answer roles reversed (Arachnoid Villi / one-way CSF flow direction). **Root cause,
+proven with an automated regression test (`backend/tests/test_wp25g_inverse_duplicate_guard.py`): a
+missing-context plumbing bug in `replace_via_llm`, not a reviewer false negative.** `_previous_for_slot`
+always excludes the target slot's own current question (by `instance_id`), and `category_history` cannot
+yet hold it either — it is appended there only *after* the same call succeeds — so the one question being
+displaced was never shown to the generator/reviewer judging its own replacement. Fixed by appending the
+slot's own old question to `previous` **ephemerally, for that one call only**
+(`backend/src/jobs/service.py::replace_via_llm`); `category_history` itself is still mutated only after
+success, unchanged. The generator submodule (re-pinned to
+`d20c46bbb332e4d40f735e843d31113176b755e5`, `WP25G: reject inverse semantic duplicates`) adds a matching
+strengthened prompt + deterministic public-text backstop on its own side — see
+`exam_generator/WPs/WP25G_GENERATOR_REPORT.md` and this repo's own `WPs/WP25G_ARCHITECT_REPORT.md`.
+**Next:** none scheduled.
+
+Prior state (WP24D/WP24, carried forward, untouched by WP25G's outer diff beyond the one
+`replace_via_llm` context fix + the re-pin): generator complete suite (pre-WP25G) 999 collected/825
+passed/174 skipped/0 failed, outer backend complete suite 121/121 passed, frontend complete suite 81/81
+passed, frontend production build succeeded. The "יצירת מבחן" screen uses `/api/exam-jobs*` end to end,
+has been validated against a real local backend + real OpenAI generation (WP20: one small mixed job,
+$0.087 of a $1.00 authorized ceiling; WP22: one integrated job + two reviewer-only replays, $0.1624 of a
+$0.50 authorized ceiling), and carries the analytics/export/audit surface WP21 restored plus WP21R's
+telemetry-clarity and crash-safety hardening. Neither WP24 nor WP25G made a live/provider call, so none
+of that live-validated state changed. The legacy synchronous `/api/test/generate` +
+`/api/test/replace-question` endpoints are **still present** (nothing on the current screen calls them)
+and may be retired by a later WP.
 
 ## 1. Repository SHAs
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | `9b250145260c450ec7511660c809fefd00e98001` (the `WP24: release integrated exam generation` commit; parent is the `WP22: targeted live evidence validation` commit, `9350877d`) | branch `main`; pushed, `HEAD == origin/main` |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `eea91b06e2ec5d053eca3a5696656fdd354a05f9` (WP24 — checked out **and re-pinned**: outer's recorded `EXPECTED_GENERATOR_PIN` now matches exactly, closing the WP21GR→WP22 known `submodule_pin` drift warning) | `heads/main`, **fully clean**, **do not commit/push here** |
+| Outer `questions-db` | `.` | Before WP25G: `9c26189ea7f6bfe8273bece953fa5375719a0e28` (`WP24D: correct release documentation`). WP25G committed as `WP25G: integrate inverse duplicate guard` — exact SHA in this WP's closing terminal response / `WPs/WP25G_ARCHITECT_REPORT.md` | branch `main`; pushed after WP25G, `HEAD == origin/main` |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `d20c46bbb332e4d40f735e843d31113176b755e5` (`WP25G: reject inverse semantic duplicates` — checked out **and re-pinned**: outer's recorded `EXPECTED_GENERATOR_PIN` matches exactly) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
-contains `eea91b0` (WP24). Pre-submodule snapshot preserved at
+contains `d20c46b` (WP25G). Pre-submodule snapshot preserved at
 `../exam_generator_pre_submodule_backup/` (untouched).
 
 ## 2. Submodule update / re-pin procedure
@@ -209,6 +219,21 @@ readiness check.
   that unit correctly. This is a reviewer-strictness issue, not a retrieval gap. Full detail,
   exact costs, criterion-by-criterion diffs, and both replayed public questions in
   `WPs/WP22_ARCHITECT_REPORT.md`.
+- **WP25G — the displaced question now reaches its own replacement's context.**
+  `service.replace_via_llm` builds `previous = _previous_for_slot(job, slot)` *before* the paid call;
+  that helper always excludes the target slot's own current question (it scans "other slots" by
+  `instance_id`), and `category_history` cannot supply it either — it is appended there only *after*
+  this exact call succeeds. Net effect (the WP25G incident): the one question being displaced was the
+  one question never shown to the generator/reviewer judging its own replacement. Fixed with a one-line
+  ephemeral append — `previous = _previous_for_slot(job, slot) + [old_question]` — scoped to that one
+  call; `category_history` mutation timing is unchanged (still post-success only, still gated on
+  `was_llm`). New regression `backend/tests/test_wp25g_inverse_duplicate_guard.py` proves it with the
+  real incident pair (a capturing fake provider records exactly what
+  `request.previous_questions` would send to the real paid call). Generator-side, `exam_generator`
+  independently strengthens its own prompts and adds a deterministic public-text backstop
+  (`duplicate_guard.semantic_duplicate_cross_role_problems`) as a final safety net — detail in
+  `exam_generator/WPs/WP25G_GENERATOR_REPORT.md`. No outer route, DTO, schema, or seven-field contract
+  change. Full detail in `WPs/WP25G_ARCHITECT_REPORT.md`.
 - Backend entrypoint `backend/run.py`, **port 4567**. `src/main.py` runs
   `store.recover_on_start()` at import (running jobs → `interrupted`).
 - Job state lives under git-ignored `artifacts/exam_jobs/<job_id>/` — JSON only,

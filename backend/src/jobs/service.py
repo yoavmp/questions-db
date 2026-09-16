@@ -689,9 +689,19 @@ def replace_via_llm(job_id: str, instance_id: str, *,
                     provider_factory: Optional[ProviderFactory] = None) -> Job:
     """LLM replacement for **any** accepted slot -- DB->LLM or LLM->LLM (WP18R).
 
-    The generator call receives every OTHER current category question plus that
+    The generator call receives every OTHER current category question, that
     category's prior displaced **LLM** questions (order + repeated numbers
-    preserved). The target's own old question is excluded from that context.
+    preserved), and -- WP25G -- the slot's OWN old question, appended
+    ephemerally for this one call only. ``_previous_for_slot`` excludes the
+    target slot by ``instance_id`` (it is, after all, one of the "other"
+    slots' own comparison set), and ``category_history`` cannot yet contain
+    this call's own old question -- it is only appended there *after* this
+    same call succeeds (see below). Left uncorrected, that means the one
+    question this call is about to displace is the one question never shown
+    to the generator/reviewer judging its replacement: WP25G's incident (an
+    accepted question displaced by its own stem/answer-reversed duplicate)
+    traced to exactly this gap. The ephemeral append here closes it without
+    touching persisted history before success.
 
     On success the slot becomes a current LLM question and -- only if it *was*
     LLM-origin -- its old question is appended to ``category_history``. On failure
@@ -719,7 +729,14 @@ def replace_via_llm(job_id: str, instance_id: str, *,
         snap = _snapshot_slot(slot)
         old_question = {f: slot.question[f] for f in SEVEN}
         provider = provider_factory() if provider_factory else None
-        previous = _previous_for_slot(job, slot)  # already excludes this slot's old question
+        # WP25G: _previous_for_slot already excludes this slot's old question
+        # (by instance_id, from the "other slots" scan) and category_history
+        # cannot yet hold it either (appended only after this call succeeds,
+        # below) -- so without this ephemeral append, the very question being
+        # displaced would never reach the generator/reviewer judging its own
+        # replacement. Appended for this call only; category_history itself
+        # is still touched only after success, unchanged from before.
+        previous = _previous_for_slot(job, slot) + [old_question]
 
         slot.retries += 1
         result = _generate_one(job, slot, kind="replace_llm", provider=provider, previous=previous)
