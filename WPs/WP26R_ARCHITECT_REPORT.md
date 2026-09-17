@@ -240,4 +240,15 @@ succeeds.
 
 ## 12. Final Git checkpoint and push outcome
 
-See the closing terminal response for the exact commit SHA and push result.
+Committed as `5f31a530ee0057a8ed6b1f18ad981e3afc1fc939`
+(`WP26R: harden categories exclusions and snapshots`), containing exactly the
+14 intended files listed in §7 — no `app.db`, no real job artifacts, no
+`.env*`, no generator/gitlink change, and neither PRE file. `git fetch origin`
+proved fast-forward safety before push; pushed normally (no force, no
+rebase/merge through divergence) — outer `main` and `origin/main` both sit at
+this SHA. `git diff --check` against the previous commit (`c49036b..5f31a53`)
+reported no whitespace errors. Generator remains clean and pinned at
+`d20c46bbb332e4d40f735e843d31113176b755e5`. Final working tree carries no
+modified files and exactly the two expected untracked owner-owned files
+(`WPs/PRE_WP25_LATEST_EXAM_REVIEW.md`, `WPs/PRE_WP26R_AUDIT.md`), both
+unmodified throughout.
