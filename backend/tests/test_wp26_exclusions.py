@@ -196,6 +196,62 @@ def test_missing_recognized_headers_rejected(jobs_app):
 
 
 # --------------------------------------------------------------------------- #
+# WP26R §2 -- hard 100-row rejection (never a partial/truncated preview)
+# --------------------------------------------------------------------------- #
+def test_exactly_100_nonblank_rows_accepted(jobs_app):
+    with jobs_app.app_context():
+        from src.jobs import exclusions as exc_mod
+
+        assert exc_mod.MAX_ROWS == 100
+        rows = [(i, "", "") for i in range(1, 101)]  # 100 nonblank data rows
+        content = _xlsx(rows)
+        preview = parse_and_resolve(content, "x.xlsx")
+        assert preview.counts["rows_total"] == 100
+
+
+def test_101st_nonblank_row_rejects_the_entire_workbook(jobs_app):
+    with jobs_app.app_context():
+        rows = [(i, "", "") for i in range(1, 102)]  # 101 nonblank data rows
+        content = _xlsx(rows)
+        with pytest.raises(ExclusionParseError):
+            parse_and_resolve(content, "x.xlsx")
+
+
+def test_oversized_workbook_returns_no_partial_ids_via_the_preview_route(jobs_client):
+    from io import BytesIO
+
+    rows = [(i, "", "") for i in range(1, 102)]
+    content = _xlsx(rows)
+    resp = jobs_client.post(
+        "/api/exam-jobs/exclusions/preview",
+        data={"file": (BytesIO(content), "x.xlsx")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "resolved_db_ids" not in body
+    assert "counts" not in body
+    assert "מקסימום" in body["error"] or "100" in body["error"]
+
+
+def test_header_row_never_counts_toward_the_limit(jobs_app):
+    with jobs_app.app_context():
+        rows = [(i, "", "") for i in range(1, 101)]  # exactly 100 -- header is separate
+        content = _xlsx(rows, headers=("מזהה_שאלה", "שאלה", "נושא"))
+        preview = parse_and_resolve(content, "x.xlsx")
+        assert preview.counts["rows_total"] == 100  # header not included
+
+
+def test_blank_physical_rows_never_count_toward_the_limit(jobs_app):
+    with jobs_app.app_context():
+        rows = [(i, "", "") for i in range(1, 101)]  # 100 nonblank
+        rows += [(None, None, None)] * 50            # 50 blank physical rows interleaved-ish
+        content = _xlsx(rows)
+        preview = parse_and_resolve(content, "x.xlsx")
+        assert preview.counts["rows_total"] == 100  # blanks never pushed it over
+
+
+# --------------------------------------------------------------------------- #
 # backend revalidation of client-supplied ids -- never trust the preview blindly
 # --------------------------------------------------------------------------- #
 def test_revalidate_drops_ids_that_vanished_since_preview(jobs_app):

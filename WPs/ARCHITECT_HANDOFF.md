@@ -3,10 +3,56 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-16 · **Latest completed WP:** WP26 (named exam history,
-immutable branches, UI polish, and DB exclusions — outer-only, offline only,
-no live/provider call, `OPENAI_API_KEY` never accessed, generator untouched).
+**Updated:** 2026-09-16 · **Latest completed WP:** WP26R (category semantics,
+a hard exclusion-workbook row limit, and immutable saved-exam snapshots —
+outer-only, offline only, no live/provider call, `OPENAI_API_KEY` never
+accessed, generator untouched). Corrects three issues a read-only audit found
+in WP26; see `WPs/WP26R_ARCHITECT_REPORT.md`.
 Supersedes the never-executed `WP25_Named_Exam_History_Branches_And_UI_Polish.md`.
+
+WP26R corrects, backward-compatibly, on top of the WP26 job model:
+
+- **Exclusion workbook hard row limit** (`backend/src/jobs/exclusions.py`):
+  `MAX_ROWS` lowered from a silent 5,000-row truncation to a hard 100-row
+  cap — the 101st non-blank data row now rejects the **entire** workbook
+  (`ExclusionParseError`, safe Hebrew message); no partial preview/resolved-id
+  set is ever returned. The header row and blank physical rows never count.
+- **One authoritative category list** (`backend/src/utils/category_rules.py`,
+  new): a single shared validator enforces `categories = nonempty, ordered,
+  unique, canonical list` and `category = categories[0]` across every
+  question create (Excel import), edit, secondary-category add/remove, and
+  category-rename write path in `backend/src/routes/upload.py`. Selection
+  eligibility (`backend/src/jobs/service.py`) now checks exact membership in
+  a question's full `categories` list only — the old `Question.category == X
+  OR categories_json LIKE '%X%'` fallback (which let the singular primary
+  independently widen eligibility, and which matched on an unanchored JSON
+  substring rather than exact list membership) is removed everywhere in the
+  active job-creation/selection/replacement/exclusion-resolution path.
+- **Globally feasible DB selection** (`service.py::_match_db_slots`): the old
+  independent per-category availability precheck plus greedy sequential
+  selection is replaced by one dependency-free bipartite-matching (Kuhn's
+  algorithm) pass over every requested DB slot at once, proving a complete,
+  globally-unique assignment exists **before** the job is persisted or any
+  provider code is reachable. Fixes a genuine false-negative/false-positive
+  pair the WP26R audit found: a shared-category question could be
+  double-counted by the old independent precheck (false "OK"), and — the
+  inverse — a feasible overlapping-category request could be incorrectly
+  rejected by naive greedy selection depending on random draw order, even
+  though a valid joint assignment existed. Candidate order (never slot order)
+  is randomized through the existing injectable RNG.
+- **Immutable saved-exam snapshots** (`jobs/model.py::Slot.primary_category` /
+  `.categories`, new fields): every accepted slot now snapshots its selecting
+  question's primary category and full category list at selection/replacement
+  time. `service._db_slot_dto` / `result_view` build every field — including
+  `primary_category`/`categories`, previously live-re-read from `Question` on
+  every view — entirely from persisted slot data; a DB row edited or deleted
+  after exam creation can no longer change a reopened exam, its DOCX/Excel
+  exports, or a branch. A pre-WP26R job with no snapshot fields falls back
+  deterministically to `primary_category = Slot.category` /
+  `categories = [Slot.category]` at read time and is never rewritten.
+
+Full detail (including the real-DB category audit that gated this WP) in
+`WPs/WP26R_ARCHITECT_REPORT.md`. **Next:** none scheduled.
 
 WP26 adds, backward-compatibly, on top of the existing `/api/exam-jobs*` job
 model (WP18-WP25G, unchanged):
@@ -117,6 +163,7 @@ readiness check.
 | Area | Location |
 |---|---|
 | Canonical categories (spelling + display order) | `backend/src/utils/category_order.py::CATEGORY_ORDER` |
+| Shared category-list invariants (nonempty/ordered/unique/canonical; WP26R) | `backend/src/utils/category_rules.py::validate_categories/dedupe_and_validate` |
 | Canonical ↔ generator context binding, aliases, strict resolver | `backend/src/integration/category_map.py` |
 | Owner policy (attempts, $5 cap, arithmetic, DB ownership) | `backend/src/integration/owner_policy.py` |
 | Per-category `{total,database,llm}` request contract | `backend/src/integration/request_contract.py` |
@@ -132,7 +179,7 @@ readiness check.
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
 | Per-question/DB analytics snapshot, full export (WP21) | `backend/src/jobs/model.py::missing_analytics`, `service.py::_db_analytics/export_full_xlsx` |
 | Crash-safe, UUID-authoritative per-invocation audit dirs + pre-call manifest (WP21R) | `backend/src/jobs/store.py::new_invocation_uuid/invocation_dir_name/invocation_audit_dir/write_invocation_manifest`, `service.py::_generate_one` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py`, `test_wp21r_audit_hardening.py` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py`, `test_wp21r_audit_hardening.py`, `test_wp25g_inverse_duplicate_guard.py`, `test_wp26_*.py`, `test_wp26r_category_invariants.py`, `test_wp26r_joint_selection.py`, `test_wp26r_snapshot_immutability.py` |
 | Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test` |
 
 - `/api/test/categories` still returns all 20 canonical categories in

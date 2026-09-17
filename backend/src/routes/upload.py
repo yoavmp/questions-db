@@ -5,6 +5,8 @@ from flask import Blueprint, request, jsonify, make_response
 from datetime import datetime
 from src.models.user import db
 from src.models.question import Question, Category
+from src.utils.category_rules import CategoryValidationError, dedupe_and_validate, validate_categories
+from src.utils.category_order import CATEGORY_ORDER
 import openpyxl
 from openpyxl import Workbook
 from io import BytesIO
@@ -233,13 +235,22 @@ def upload_excel():
                     categories.append(mapped_row['category2'])
                 if mapped_row.get('category3'):
                     categories.append(mapped_row['category3'])
-                
+
                 # Remove duplicates while preserving order
                 unique_categories = []
                 for cat in categories:
                     if cat and cat not in unique_categories:
                         unique_categories.append(cat)
-                
+
+                # WP26R §3: categories = nonempty, ordered, unique canonical
+                # list -- reject the row rather than persist a non-canonical
+                # or contradictory value.
+                try:
+                    unique_categories = validate_categories(unique_categories)
+                except CategoryValidationError as ve:
+                    errors.append(f"שורה {row_num}: {ve}")
+                    continue
+
                 # Create question
                 question = Question(
                     id=next_id,
@@ -320,18 +331,35 @@ def update_question(question_id):
             return jsonify({"error": "השאלה לא נמצאה"}), 404
         
         data = request.get_json()
-        
+
+        # WP26R §3: `categories` is the sole authority; an explicit singular
+        # `category` in the payload may not silently widen/contradict it.
+        new_categories = data.get('categories', question.categories)
+        try:
+            new_categories = validate_categories(new_categories)
+        except CategoryValidationError as ve:
+            return jsonify({"error": str(ve)}), 400
+        if 'category' in data and data['category'] != new_categories[0]:
+            return jsonify({
+                "error": f"קטגוריה ראשית '{data['category']}' סותרת את רשימת הקטגוריות "
+                         f"המלאה (הראשונה ברשימה: '{new_categories[0]}')"
+            }), 400
+
         # Update fields
-        question.category = data.get('category', question.category)
-        question.categories = data.get('categories', question.categories)
+        question.categories = new_categories
         question.question = data.get('question', question.question)
         question.answer1 = data.get('answer1', question.answer1)
         question.answer2 = data.get('answer2', question.answer2)
         question.answer3 = data.get('answer3', question.answer3)
         question.answer4 = data.get('answer4', question.answer4)
         question.correct_answer_id = data.get('correct_answer_id', question.correct_answer_id)
-        question.accuracy = data.get('accuracy', question.accuracy)
-        question.distinction = data.get('distinction', question.distinction)
+        # `accuracy`/`distinction` are read-only means over `accuracy_list`/
+        # `distinction_list` (there is no setter) -- only replace the list
+        # when the caller actually supplied a new single value.
+        if 'accuracy' in data and data['accuracy'] is not None:
+            question.accuracy_list = [data['accuracy']]
+        if 'distinction' in data and data['distinction'] is not None:
+            question.distinction_list = [data['distinction']]
         question.updated_at = datetime.utcnow()
         
         db.session.commit()
@@ -363,8 +391,12 @@ def add_secondary_category(question_id):
         
         if len(current_categories) >= 3:
             return jsonify({"error": "ניתן להוסיף עד 3 קטגוריות לשאלה"}), 400
-        
+
         current_categories.append(new_category)
+        try:
+            current_categories = validate_categories(current_categories)
+        except CategoryValidationError as ve:
+            return jsonify({"error": str(ve)}), 400
         question.categories = current_categories
         question.updated_at = datetime.utcnow()
         
@@ -399,8 +431,11 @@ def remove_secondary_category(question_id):
             return jsonify({"error": "לא ניתן להסיר את הקטגוריה היחידה"}), 400
         
         current_categories.remove(category_to_remove)
-        question.categories = current_categories
-        question.category = current_categories[0]  # Update primary category
+        try:
+            current_categories = validate_categories(current_categories)
+        except CategoryValidationError as ve:
+            return jsonify({"error": str(ve)}), 400
+        question.categories = current_categories  # setter also derives primary = categories[0]
         question.updated_at = datetime.utcnow()
         
         db.session.commit()
@@ -689,25 +724,34 @@ def update_category_name(category_name):
     try:
         data = request.get_json()
         new_name = data.get('new_name')
-        
+
         if not new_name:
             return jsonify({"error": "חסר שם חדש לקטגוריה"}), 400
-        
+
+        # WP26R §3: a rename target must itself be a byte-exact canonical
+        # category -- never introduces a non-canonical entry into the list.
+        if new_name not in CATEGORY_ORDER:
+            return jsonify({"error": f"קטגוריה לא מוכרת (לא קנונית): '{new_name}'"}), 400
+
         # Update all questions with this category
         questions = Question.query.all()
         updated_count = 0
-        
+
         for question in questions:
             categories = question.categories
             if category_name in categories:
-                # Update the category in the list
+                # Update the category in the list, preserving order and
+                # deduplicating (renaming into an already-present category is
+                # a legitimate merge, not a malformed write) -- then recompute
+                # the singular primary from the validated list's first entry.
                 categories = [new_name if cat == category_name else cat for cat in categories]
-                question.categories = categories
-                
-                # Update primary category if needed
-                if question.category == category_name:
-                    question.category = new_name
-                
+                try:
+                    categories = dedupe_and_validate(categories)
+                except CategoryValidationError as ve:
+                    db.session.rollback()  # never commit a partial rename
+                    return jsonify({"error": str(ve)}), 400
+                question.categories = categories  # setter also derives primary = categories[0]
+
                 question.updated_at = datetime.utcnow()
                 updated_count += 1
         

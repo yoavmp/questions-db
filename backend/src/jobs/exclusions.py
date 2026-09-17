@@ -22,7 +22,7 @@ __all__ = [
 ]
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MB
-MAX_ROWS = 5000  # data rows, header excluded
+MAX_ROWS = 100  # nonblank data rows, header excluded (WP26R §2 -- hard reject, no truncation)
 
 _ID_HEADERS = {"מזהה_שאלה", "id"}
 _TEXT_HEADERS = {"שאלה", "question"}
@@ -92,7 +92,6 @@ def parse_and_resolve(file_bytes: bytes, filename: str) -> ExclusionPreview:
     import openpyxl
 
     from src.models.question import Question
-    from src.models.user import db
     from src.utils.category_order import CATEGORY_ORDER
 
     if not (filename or "").lower().endswith(".xlsx"):
@@ -136,13 +135,21 @@ def parse_and_resolve(file_bytes: bytes, filename: str) -> ExclusionPreview:
     rows_total = 0
     resolved_ids: set[int] = set()
 
+    # all questions loaded once and matched by exact parsed-category-list
+    # membership (WP26R §3) -- never a category substring/LIKE match.
+    all_questions = Question.query.all()
+    by_id = {q.id: q for q in all_questions}
+
     for row_num, row in enumerate(rows_iter, start=2):
-        if rows_total >= MAX_ROWS:
-            warnings.append(f"הקובץ נחתך אחרי {MAX_ROWS} שורות")
-            break
         if row is None or not any(c is not None and str(c).strip() != "" for c in row):
             continue  # blank row -- ignored, not an error
         rows_total += 1
+        if rows_total > MAX_ROWS:
+            # WP26R §2: the 101st nonblank data row rejects the ENTIRE
+            # workbook -- no partial preview/exclusion set is ever returned.
+            raise ExclusionParseError(
+                f"הקובץ מכיל יותר מ-{MAX_ROWS} שורות נתונים; המקסימום המותר הוא {MAX_ROWS} שורות"
+            )
 
         raw_id = _cell(row, id_idx)
         raw_text = normalize_text(_cell(row, text_idx))
@@ -156,7 +163,7 @@ def parse_and_resolve(file_bytes: bytes, filename: str) -> ExclusionPreview:
             except (TypeError, ValueError):
                 parsed_id = None
         if parsed_id is not None:
-            row_obj = db.session.get(Question, parsed_id)
+            row_obj = by_id.get(parsed_id)
             if row_obj is not None:
                 resolved_ids.add(row_obj.id)
                 resolved_rows += 1
@@ -167,20 +174,16 @@ def parse_and_resolve(file_bytes: bytes, filename: str) -> ExclusionPreview:
             unresolved_rows += 1
             continue
 
-        matches = None
+        # exact parsed-list membership (WP26R §3) -- never a category
+        # substring/LIKE match.
         if raw_cat:
-            # rule 2: exact normalized text + canonical category
-            candidates = Question.query.filter(
-                db.or_(
-                    Question.category == raw_cat,
-                    Question.categories_json.like(f'%"{raw_cat}"%'),
-                )
-            ).all()
-            matches = [q for q in candidates if normalize_text(q.question) == raw_text]
+            # rule 2: exact normalized text + canonical category (anywhere in
+            # the question's full category list, not only its primary)
+            candidates = [q for q in all_questions if raw_cat in q.categories]
         else:
             # rule 3: exact normalized text across the whole DB
-            candidates = Question.query.all()
-            matches = [q for q in candidates if normalize_text(q.question) == raw_text]
+            candidates = all_questions
+        matches = [q for q in candidates if normalize_text(q.question) == raw_text]
 
         if not matches:
             unresolved_rows += 1
@@ -199,23 +202,9 @@ def parse_and_resolve(file_bytes: bytes, filename: str) -> ExclusionPreview:
 
     availability_by_category: dict[str, int] = {}
     for cat in CATEGORY_ORDER:
-        total = Question.query.filter(
-            db.or_(
-                Question.category == cat,
-                Question.categories_json.like(f'%"{cat}"%'),
-            )
-        ).count()
-        if resolved_ids:
-            excluded_here = Question.query.filter(
-                Question.id.in_(resolved_ids),
-                db.or_(
-                    Question.category == cat,
-                    Question.categories_json.like(f'%"{cat}"%'),
-                ),
-            ).count()
-        else:
-            excluded_here = 0
-        availability_by_category[cat] = total - excluded_here
+        in_cat = [q for q in all_questions if cat in q.categories]
+        excluded_here = sum(1 for q in in_cat if q.id in resolved_ids)
+        availability_by_category[cat] = len(in_cat) - excluded_here
 
     return ExclusionPreview(
         resolved_db_ids=sorted_ids,

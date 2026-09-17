@@ -220,14 +220,32 @@ Since WP26, creating a new exam ("יצירת מבחן") asks for either a **stru
 name** (קורס / שנה / סוג / מועד) or a **custom name**, and optionally accepts
 an `.xlsx` file listing DB questions to exclude from selection (headers
 `מזהה_שאלה`/`id`, `שאלה`/`question`, `נושא`/`קטגוריה`/`category`) — the file
-itself is never stored, only the resolved question ids.
+itself is never stored, only the resolved question ids. Since WP26R, the
+exclusion workbook accepts **at most 100 non-blank data rows** (the header
+row doesn't count); a 101st non-blank row rejects the whole file with a clear
+Hebrew message — no partial exclusion list is ever accepted.
 
 Every created exam is saved to a history list (visible in the "יצירת מבחן"
 tab) showing its name, date, status and short id, regardless of whether it
 completed. Opening an older exam from that list is **read-only** — to keep
 working from it without changing the original, use "יצירת גרסה חדשה" to
 create an independent, editable branch that starts with the same questions
-and no prior LLM cost.
+and no prior LLM cost. Every question/category/analytics field shown for a
+saved exam (including a branch) is frozen at the moment it was selected — it
+never changes even if the source question in the bank is later edited or
+deleted.
+
+## Question Categories - קטגוריות שאלות
+
+A question's **full category list** (`categories`) is the only thing that
+makes it eligible for a requested category when building an exam — the
+single **primary category** (`category`, shown as the question's main topic)
+is always just the first entry of that list and can never by itself make a
+question eligible for a category it isn't otherwise tagged with. Every entry
+in a question's category list must be one of the 20 canonical topics; an
+Excel import row, manual edit, or category rename that would produce an
+empty, unknown, or duplicate category list is rejected with a clear error
+message rather than silently accepted.
 
 ## Next Steps - צעדים הבאים
 

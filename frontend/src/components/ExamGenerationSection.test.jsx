@@ -811,6 +811,41 @@ describe('WP26 - identity form, saved-exam history, read-only viewing, branching
     expect(payload.excluded_db_ids).toEqual([7, 8])
   })
 
+  it('clears a prior successful exclusion preview when a replacement upload fails (WP26R §2)', async () => {
+    const user = userEvent.setup()
+    api.previewExclusionFile.mockResolvedValueOnce({
+      resolved_db_ids: [7, 8], counts: { resolved: 2, deduplicated: 2, unresolved: 0, ambiguous: 0 }, warnings: [],
+    })
+    render(<ExamGenerationSection />)
+    const total = await screen.findByLabelText('סה"כ שאלות עבור מבוא')
+    await user.clear(total)
+    await user.type(total, '4')
+    await user.clear(screen.getByLabelText('שאלות בבינה מלאכותית עבור מבוא'))
+    await user.type(screen.getByLabelText('שאלות בבינה מלאכותית עבור מבוא'), '0')
+    await user.clear(screen.getByLabelText('שאלות מהמאגר עבור מבוא'))
+    await user.type(screen.getByLabelText('שאלות מהמאגר עבור מבוא'), '4')
+
+    const fileInput = screen.getByLabelText(/קובץ שאלות להחרגה/)
+    const goodFile = new File(['x'], 'excl.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    await user.upload(fileInput, goodFile)
+    await screen.findByTestId('exclusion-preview')
+
+    // a replacement upload that the backend rejects (e.g. >100 rows)
+    api.previewExclusionFile.mockRejectedValueOnce(new Error('הקובץ מכיל יותר מ-100 שורות נתונים'))
+    const badFile = new File(['y'], 'excl2.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    await user.upload(fileInput, badFile)
+
+    await waitFor(() => expect(screen.queryByTestId('exclusion-preview')).not.toBeInTheDocument())
+    expect(await screen.findByText(/הקובץ מכיל יותר מ-100 שורות/)).toBeInTheDocument()
+
+    // the stale resolved_db_ids must never reach job creation
+    api.createJob.mockResolvedValue({ job_id: 'job-1', status: 'queued', display_name: 'x', slug: 'x' })
+    api.fetchJob.mockResolvedValue(makeView({ job_id: 'job-1' }))
+    await user.click(screen.getByRole('button', { name: 'צור מבחן' }))
+    await waitFor(() => expect(api.createJob).toHaveBeenCalled())
+    expect(api.createJob.mock.calls[0][0].excluded_db_ids).toEqual([])
+  })
+
   it('opening a saved exam from the selector shows it read-only and hides mutation controls', async () => {
     api.fetchJobsList.mockResolvedValue([
       { job_id: 'old-job', display_name: 'מבחן ישן', created_utc: '2026-01-01T00:00:00Z', status: 'completed' },

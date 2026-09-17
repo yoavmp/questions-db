@@ -62,39 +62,92 @@ class JobConflict(RuntimeError):
 # --------------------------------------------------------------------------- #
 # DB selection (needs a Flask app context)
 # --------------------------------------------------------------------------- #
-def _db_availability(category: str, exclude_ids: frozenset = frozenset()) -> int:
-    from src.models.user import db
+#: WP26R §3 -- eligibility for category X is exact membership of X in the
+#: question's full ``categories`` list (parsed JSON, byte-exact canonical
+#: strings). Never a substring/LIKE match on ``categories_json`` and never
+#: widened by the singular ``category`` alone.
+def _candidate_map(exclude_ids: frozenset = frozenset()) -> tuple[dict[str, list[int]], dict[int, Any]]:
+    """Load every question once and index it by exact category-list membership.
+
+    Returns ``(candidates_by_category, rows_by_id)`` -- ``candidates_by_category``
+    maps each canonical category to the ids currently eligible for it (excluded
+    ids removed), ``rows_by_id`` maps every id (excluded or not) to its row so
+    callers can still look up an excluded row if needed.
+    """
     from src.models.question import Question
 
-    q = Question.query.filter(
-        db.or_(
-            Question.category == category,
-            Question.categories_json.like(f'%"{category}"%'),
-        )
-    )
-    if exclude_ids:
-        q = q.filter(~Question.id.in_(exclude_ids))
-    return q.count()
+    rows = Question.query.all()
+    rows_by_id = {q.id: q for q in rows}
+    candidates: dict[str, list[int]] = {c: [] for c in CATEGORY_ORDER}
+    for q in rows:
+        if q.id in exclude_ids:
+            continue
+        for c in q.categories:
+            if c in candidates:
+                candidates[c].append(q.id)
+    return candidates, rows_by_id
 
 
 def _select_db_questions(category: str, count: int, exclude_ids: set[int], rng: random.Random) -> list:
-    """The existing random selector: any row whose primary OR secondary category
-    matches, minus rows already in the exam / excluded, sampled uniformly."""
-    from src.models.user import db
+    """Single-target-category random selector used by DB replacement: any row
+    whose authoritative ``categories`` list contains ``category`` (exact
+    membership only), minus rows already in the exam / excluded, sampled
+    uniformly."""
     from src.models.question import Question
 
-    rows = Question.query.filter(
-        db.or_(
-            Question.category == category,
-            Question.categories_json.like(f'%"{category}"%'),
-        )
-    ).all()
-    pool = [q for q in rows if q.id not in exclude_ids]
+    rows = Question.query.all()
+    pool = [q for q in rows if q.id not in exclude_ids and category in q.categories]
     if len(pool) < count:
         raise JobError(
             f"category {category!r}: only {len(pool)} database question(s) available, {count} requested"
         )
     return rng.sample(pool, count)
+
+
+def _match_db_slots(
+    slot_categories: list[str], candidates_by_category: dict[str, list[int]], rng: random.Random,
+) -> Optional[list[int]]:
+    """Global feasible unique assignment for every requested DB slot (WP26R §4).
+
+    ``slot_categories`` is the FIXED, canonical-order list of one entry per
+    requested DB slot (never shuffled -- only candidate order is randomized).
+    Returns a list the same length, each entry a distinct DB id whose category
+    list contains that slot's category, or ``None`` if no complete matching
+    exists (some DB id would have to fill two slots).
+
+    Dependency-free augmenting-path (Kuhn's algorithm) bipartite matching:
+    O(slots * candidates) per augmentation, trivial at the documented scale
+    (fewer than 500 DB questions, at most ~40 exam questions). Correctness
+    (whether a complete matching is found, given one exists) does not depend
+    on visitation order -- only *which* of several possible complete matchings
+    is found does -- so shuffling candidate order per attempt is safe
+    randomization, not a correctness risk.
+    """
+    n = len(slot_categories)
+    match_of_id: dict[int, int] = {}  # db_id -> slot_index currently holding it
+
+    def try_assign(slot_idx: int, visited: set[int]) -> bool:
+        cat = slot_categories[slot_idx]
+        cands = list(candidates_by_category.get(cat, ()))
+        rng.shuffle(cands)
+        for cid in cands:
+            if cid in visited:
+                continue
+            visited.add(cid)
+            if cid not in match_of_id or try_assign(match_of_id[cid], visited):
+                match_of_id[cid] = slot_idx
+                return True
+        return False
+
+    for slot_idx in range(n):  # fixed canonical slot order
+        if not try_assign(slot_idx, set()):
+            return None
+
+    assignment: list[Optional[int]] = [None] * n
+    for cid, sidx in match_of_id.items():
+        assignment[sidx] = cid
+    assert all(a is not None for a in assignment)  # every slot_idx was try_assign'd
+    return assignment  # type: ignore[return-value]
 
 
 def _row_seven(row: Any, number: int) -> dict:
@@ -188,17 +241,44 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
         raise JobError(str(exc)) from exc
     excluded_id_set = set(excluded_ids)
 
-    # DB availability check BEFORE creating the job -- exclusions count against
-    # availability atomically, with a category-specific Hebrew message, so no
-    # partial DB selection and no LLM call ever happens when a category can't
-    # be satisfied (WP26 §3 safety requirement).
+    # canonical order (established before both the feasibility check and job
+    # assembly, so slot order is identical either way)
+    parsed.sort(key=lambda pc: CATEGORY_ORDER.index(pc[0].category))
+
+    # WP26R §4 -- one global feasible-unique-assignment proof for EVERY
+    # requested DB slot, before the job or any slot exists and before any
+    # provider code is reachable. Independent per-category availability is
+    # a necessary-but-not-sufficient precheck (fast, specific message); the
+    # bipartite match is the actual joint-feasibility proof (categories may
+    # overlap, so passing every independent check does not guarantee a joint
+    # assignment exists).
+    candidates_by_category, rows_by_id = _candidate_map(exclude_ids=frozenset(excluded_id_set))
+    slot_categories: list[str] = []
     for req, _ in parsed:
-        avail = _db_availability(req.category, exclude_ids=excluded_id_set)
+        avail = len(candidates_by_category.get(req.category, ()))
         if req.database > avail:
             raise JobError(
                 f"קטגוריה '{req.category}': נדרשו {req.database} שאלות מהמאגר, "
                 f"זמינות בפועל {avail} (לאחר החרגות)"
             )
+        slot_categories.extend([req.category] * req.database)
+
+    rng = random.Random(seed)
+    assignment: list[int] = []
+    if slot_categories:
+        matched = _match_db_slots(slot_categories, candidates_by_category, rng)
+        if matched is None:
+            counts_msg = "; ".join(
+                f"{req.category}: נדרשו {req.database}, זמינות עצמאית "
+                f"{len(candidates_by_category.get(req.category, ()))}"
+                for req, _ in parsed if req.database
+            )
+            raise JobError(
+                "לא ניתן להקצות שאלות ייחודיות מהמאגר לכל הקטגוריות המבוקשות: "
+                "לאחר חפיפת קטגוריות והחרגות אין הקצאה ייחודית אפשרית, גם אם כל "
+                f"קטגוריה בנפרד נראית זמינה בנפרד ({counts_msg})"
+            )
+        assignment = matched
 
     job = Job(
         job_id=new_id(), cost_ceiling_usd=str(cap),
@@ -215,12 +295,10 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
         for msg in excl_warnings:
             job.warnings.append({"code": "excluded_id_dropped", "message": msg})
 
-    rng = random.Random(seed)
-    exclude_ids: set[int] = set(excluded_id_set)
-
-    # canonical order + running global number base
-    parsed.sort(key=lambda pc: CATEGORY_ORDER.index(pc[0].category))
+    # running global number base; DB slots consume ``assignment`` in the same
+    # fixed canonical order used to build ``slot_categories`` above
     number = 0
+    assignment_cursor = 0
     for req, context_id in parsed:
         plan = CategoryPlan(
             category=req.category, context_id=context_id,
@@ -228,25 +306,31 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
             total=req.total, database=req.database, llm=req.llm,
             number_base=number,
         )
-        # A database questions first
-        chosen = _select_db_questions(req.category, req.database, exclude_ids, rng) if req.database else []
-        for i, row in enumerate(chosen):
+        # A database questions first -- each ID already proven globally unique
+        # across the WHOLE exam by the matching above; every listed category of
+        # the matched row is equally eligible, never only its primary.
+        chosen_ids = assignment[assignment_cursor:assignment_cursor + req.database]
+        assignment_cursor += req.database
+        for i, qid in enumerate(chosen_ids):
+            row = rows_by_id[qid]
             number += 1
-            exclude_ids.add(row.id)
             plan.db_selected_ids.append(row.id)
             job.slots.append(Slot(
                 slot_id=new_id(), instance_id=new_id(), category=req.category,
                 context_id=context_id, kind="database", order_in_category=i, number=number,
                 status="accepted", question=_row_seven(row, number), db_id=row.id,
                 analytics=_db_analytics(row),
+                primary_category=row.category, categories=list(row.categories),
             ))
-        # B LLM slots (queued; generated by run_job)
+        # B LLM slots (queued; generated by run_job). Category metadata
+        # deterministically reflects the fixed target category (WP26R §5).
         for i in range(req.llm):
             number += 1
             job.slots.append(Slot(
                 slot_id=new_id(), instance_id=new_id(), category=req.category,
                 context_id=context_id, kind="llm", order_in_category=i, number=number,
                 status="queued",
+                primary_category=req.category, categories=[req.category],
             ))
         job.categories.append(plan)
 
@@ -631,8 +715,9 @@ def _restore_slot(slot: Slot, snap: dict) -> None:
 
 def _apply_db_origin(slot: Slot, row: Any) -> None:
     """Make ``slot`` a current DB question: ``kind=database``, integer ``db_id``,
-    the row's seven fields, DB defaults, no LLM generation metadata, and a
-    fresh accuracy/distinction snapshot (WP21 §3)."""
+    the row's seven fields, DB defaults, a fresh accuracy/distinction snapshot
+    (WP21 §3), and a fresh category snapshot (WP26R §5) -- the row's primary
+    and full category list AT THIS MOMENT, never re-read afterwards."""
     slot.kind = "database"
     slot.db_id = row.id
     slot.question = _row_seven(row, slot.number)
@@ -643,15 +728,21 @@ def _apply_db_origin(slot: Slot, row: Any) -> None:
     slot.audit_ref = None
     slot.safe_error = None
     slot.analytics = _db_analytics(row)
+    slot.primary_category = row.category
+    slot.categories = list(row.categories)
 
 
 def _apply_llm_origin(slot: Slot) -> None:
     """Make ``slot`` a current LLM question: ``kind=llm``, ``db_id=None``, no
     performance history (WP21 §3). The seven fields / generation metadata
-    were already set by ``_generate_one`` on the accepted result."""
+    were already set by ``_generate_one`` on the accepted result. Category
+    metadata deterministically reflects the slot's fixed target category
+    (WP26R §5) -- an LLM question has no independent category of its own."""
     slot.kind = "llm"
     slot.db_id = None
     slot.analytics = missing_analytics()
+    slot.primary_category = slot.category
+    slot.categories = [slot.category]
 
 
 def _recompute_db_selected_ids(job: Job, category: str) -> None:
@@ -1073,6 +1164,12 @@ def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
                 number=s.number, status="accepted", attempts=0, retries=0,
                 safe_error=None, question=dict(s.question), db_id=s.db_id,
                 audit_ref=None, was_repaired=False, analytics=dict(s.analytics),
+                # WP26R §5: deep-copy the category snapshot as-is (including a
+                # pre-WP26R ``None``, which the child renders via the same
+                # deterministic fallback as the parent) -- never refreshed
+                # from the live DB.
+                primary_category=s.primary_category,
+                categories=list(s.categories) if s.categories is not None else None,
             ))
         new_categories = [
             CategoryPlan(
@@ -1111,34 +1208,23 @@ def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
 
 
 def _db_slot_dto(slot: Slot) -> ExamQuestionDTO:
-    """Rich DTO for a DB slot: re-fetch the row for its categories when an app
-    context is available, else fall back to the stored seven fields.
+    """Rich DTO for a DB slot, built ENTIRELY from persisted slot data (WP26R
+    §5) -- never a live query of the ``Question`` table. Question text,
+    answers, correct answer, primary category, full category list and
+    analytics all come from the slot's own selection-time snapshot, so a
+    saved exam stays byte-stable across later DB edits/deletes and renders
+    identically with or without an app context.
 
-    Accuracy/distinction always come from ``slot.analytics`` -- the snapshot
-    taken at selection/replacement time (WP21 §3) -- never from a live re-query
-    of the row. That keeps the persisted job result stable and correct even if
-    the row's own performance data changes later, the row is deleted, or no
-    app context is available when this view is built (previously the DTO
-    silently lost its accuracy/distinction in that last case).
-    """
-    row = None
-    try:
-        from src.models.question import Question
-        from src.models.user import db
-
-        if slot.db_id is not None:
-            row = db.session.get(Question, slot.db_id)
-    except Exception:  # noqa: BLE001 - no app context / row gone
-        row = None
-    if row is not None:
-        dto = ExamQuestionDTO.from_db_question(row, number=slot.number, category=slot.category)
-        dto.instance_id = slot.instance_id
-    else:
-        dto = ExamQuestionDTO(
-            **{f: slot.question[f] for f in SEVEN},
-            origin="database", id=slot.db_id, instance_id=slot.instance_id,
-            category=slot.category, primary_category=slot.category, categories=[slot.category],
-        )
+    ``primary_category`` / ``categories`` fall back deterministically to
+    ``slot.category`` / ``[slot.category]`` for a pre-WP26R slot that has no
+    snapshot (never enriched from the live DB)."""
+    primary_category = slot.primary_category if slot.primary_category is not None else slot.category
+    categories = list(slot.categories) if slot.categories is not None else [slot.category]
+    dto = ExamQuestionDTO(
+        **{f: slot.question[f] for f in SEVEN},
+        origin="database", id=slot.db_id, instance_id=slot.instance_id,
+        category=slot.category, primary_category=primary_category, categories=categories,
+    )
     dto.accuracy = slot.analytics.get("accuracy")
     dto.distinction = slot.analytics.get("distinction")
     dto.accuracy_list = list(slot.analytics.get("accuracy_list") or [])

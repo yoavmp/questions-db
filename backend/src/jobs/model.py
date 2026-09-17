@@ -76,6 +76,17 @@ class Slot:
     #: fields) and never sent to the generator.
     analytics: dict = field(default_factory=missing_analytics)
 
+    #: WP26R §5 -- selection-time category snapshot, immutable thereafter.
+    #: ``primary_category`` is the DB question's singular primary at the
+    #: moment it entered this slot (== ``category`` for LLM-origin slots);
+    #: ``categories`` is its full ordered category list at that moment
+    #: (``[category]`` for LLM-origin). ``None`` on every pre-WP26R slot --
+    #: never backfilled onto a legacy persisted job; ``result_view`` applies
+    #: the deterministic ``primary_category = category`` /
+    #: ``categories = [category]`` fallback at read time instead.
+    primary_category: Optional[str] = None
+    categories: Optional[list] = None
+
     def to_dict(self) -> dict:
         return {
             "slot_id": self.slot_id,
@@ -94,6 +105,8 @@ class Slot:
             "audit_ref": self.audit_ref,
             "was_repaired": self.was_repaired,
             "analytics": self.analytics,
+            "primary_category": self.primary_category,
+            "categories": self.categories,
         }
 
     @classmethod
@@ -115,6 +128,10 @@ class Slot:
             audit_ref=d.get("audit_ref"),
             was_repaired=d.get("was_repaired", False),
             analytics=d.get("analytics") or missing_analytics(),
+            # WP26R §5: absent on every pre-WP26R slot -- calculated fallback
+            # only (see ``service.result_view``), never backfilled here.
+            primary_category=d.get("primary_category"),
+            categories=d.get("categories"),
         )
 
 
