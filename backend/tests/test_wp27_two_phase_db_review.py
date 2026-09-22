@@ -476,8 +476,12 @@ def test_branching_blocked_until_llm_phase_completes(jobs_app, jobs_root, llm_re
     with pytest.raises(service.JobConflict):
         service.branch_job(job.job_id, None)
 
+    # WP27R §1: workflow_phase is now persisted, not derived from status --
+    # a real claim always sets both together (claim_llm_continuation/run_job),
+    # so this synthetic simulation must too.
     running = store.load(job.job_id)
     running.status = "running"
+    running.workflow_phase = "llm_generation"
     store.save(running)
     assert service.workflow_phase(running) == "llm_generation"
     with pytest.raises(service.JobConflict):
@@ -485,6 +489,7 @@ def test_branching_blocked_until_llm_phase_completes(jobs_app, jobs_root, llm_re
 
     interrupted = store.load(job.job_id)
     interrupted.status = "interrupted"
+    interrupted.workflow_phase = "llm_generation"
     store.save(interrupted)
     assert service.workflow_phase(interrupted) == "llm_generation"
     with pytest.raises(service.JobConflict):
@@ -501,7 +506,14 @@ def test_branching_blocked_until_llm_phase_completes(jobs_app, jobs_root, llm_re
 # --------------------------------------------------------------------------- #
 # 17. legacy persisted jobs without the new phase load safely
 # --------------------------------------------------------------------------- #
-def test_legacy_job_json_without_workflow_phase_field_loads_and_maps_safely(jobs_app, jobs_root, llm_ready):
+def test_workflow_phase_is_now_persisted_and_legacy_json_still_loads_safely(jobs_app, jobs_root, llm_ready):
+    """WP27R §1/§2 supersedes this test's original WP27-era premise (that
+    ``workflow_phase`` was never persisted, being a pure function of
+    ``status``) -- it is now a real, validated, persisted ``Job`` field (see
+    ``test_wp27r_persisted_phase_and_recovery.py`` for the full WP27R suite);
+    this test keeps proving the legacy-loading half of the contract: a
+    job.json written before this field existed still loads safely, without
+    a rewrite-on-read, and infers a safe value."""
     with jobs_app.app_context():
         job = service.create_job({
             "categories": {CAT: {"total": 2, "database": 1, "llm": 1}},
@@ -510,10 +522,20 @@ def test_legacy_job_json_without_workflow_phase_field_loads_and_maps_safely(jobs
     done = service.continue_llm_generation(job.job_id, provider_factory=dispatch_factory(Dispatch()))
     raw_path = store._job_file(done.job_id)
     raw_before = raw_path.read_text("utf-8")
-    assert "workflow_phase" not in raw_before  # never persisted -- pure function of status
+    assert '"workflow_phase": "complete"' in raw_before  # WP27R: now genuinely persisted
     reloaded = store.load(done.job_id)
     assert service.workflow_phase(reloaded) == "complete"
-    assert raw_path.read_text("utf-8") == raw_before  # reading never rewrites the file
+    assert raw_path.read_text("utf-8") == raw_before  # merely reloading never rewrites the file
+
+    # simulate a genuinely pre-WP27R job.json (the field never existed)
+    import json
+
+    legacy_raw = json.loads(raw_before)
+    del legacy_raw["workflow_phase"]
+    raw_path.write_text(json.dumps(legacy_raw), encoding="utf-8")
+    legacy_loaded = store.load(done.job_id)
+    assert legacy_loaded.workflow_phase == "complete"  # inferred, not persisted by this load
+    assert raw_path.read_text("utf-8") == json.dumps(legacy_raw)  # loading alone never rewrites
 
     # a legacy job "stuck" queued with a still-queued LLM slot (a pre-WP27
     # crash between create_job's own save and run_job's first save) now reads
@@ -524,14 +546,24 @@ def test_legacy_job_json_without_workflow_phase_field_loads_and_maps_safely(jobs
             "categories": {CAT: {"total": 1, "database": 0, "llm": 1}},
             "cost_ceiling_usd": "5.00",
         })
-    assert stuck.status == "queued"
-    assert service.workflow_phase(stuck) == "db_review"
+    stuck_path = store._job_file(stuck.job_id)
+    stuck_raw = json.loads(stuck_path.read_text("utf-8"))
+    del stuck_raw["workflow_phase"]
+    stuck_path.write_text(json.dumps(stuck_raw), encoding="utf-8")
+    stuck_legacy = store.load(stuck.job_id)
+    assert stuck_legacy.status == "queued"
+    assert service.workflow_phase(stuck_legacy) == "db_review"
 
     # the other rare legacy corner: "queued" with NO llm slot at all reads as
     # complete, never stuck "awaiting approval" forever for zero planned items
     synthetic = store.load(stuck.job_id)
     synthetic.slots = [s for s in synthetic.slots if s.kind != "llm"]
-    assert service.workflow_phase(synthetic) == "complete"
+    synthetic_raw = synthetic.to_dict()
+    del synthetic_raw["workflow_phase"]
+    from src.jobs.model import Job as _Job
+
+    synthetic_from_legacy = _Job.from_dict(synthetic_raw)
+    assert service.workflow_phase(synthetic_from_legacy) == "complete"
 
 
 # --------------------------------------------------------------------------- #

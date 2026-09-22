@@ -3,11 +3,75 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-22 · **Latest completed WP:** WP27 (staged DB review
-before LLM generation — outer-only, offline only, no live/provider call,
-`OPENAI_API_KEY` never accessed, generator untouched); see
-`WPs/WP27_ARCHITECT_REPORT.md`.
+**Updated:** 2026-09-22 · **Latest completed WP:** WP27R (persisted workflow
+phase, atomic Continue claim, and recovery — corrects two WP27 production-
+state gaps; outer-only, offline only, no live/provider call, `OPENAI_API_KEY`
+never accessed, generator untouched); see `WPs/WP27R_ARCHITECT_REPORT.md`.
 Supersedes the never-executed `WP25_Named_Exam_History_Branches_And_UI_Polish.md`.
+
+WP27R corrects, backward-compatibly, on top of the WP27 job model (WP27's
+description below is otherwise unchanged and still accurate — read it for
+everything WP27R does not modify):
+
+- **`workflow_phase` is now a persisted `Job` field, not derived.** WP27's
+  original design recomputed `db_review`/`llm_generation`/`complete` fresh
+  from `status` on every read. That had two real gaps: (1) an async
+  Continue's `202` could be followed by an immediate `GET` that still saw
+  the pre-claim `queued` state, since nothing was persisted synchronously
+  yet, causing the frontend to stop polling while generation quietly ran in
+  the background; (2) retrying one `interrupted` slot while later planned
+  slots stayed `queued` recomputed the derived phase as `complete` (status
+  alone doesn't distinguish "never attempted" from "genuinely done"),
+  hiding Continue and stranding real planned work. `workflow_phase` (see
+  `backend/src/jobs/model.py::WORKFLOW_PHASES`) is validated on save,
+  inferred once (never rewritten-on-read) for any legacy job.json that
+  predates the field via `model._infer_legacy_workflow_phase`, and updated
+  at every mutation site that can change it (`create_job`, `run_job`,
+  `_finalise`, `branch_job`'s child).
+- **`_finalise` now derives phase from whether any planned slot is still
+  untouched** (`status` in `queued`/`running`/`interrupted`) rather than
+  from the terminal-vs-not shape of `job.status` — so `partial` and
+  `cost_ceiling` correctly coexist with `llm_generation` whenever real
+  planned work remains, while a fully-traversed batch is `complete` even if
+  one of its slots individually stayed rejected/retryable (`status ==
+  "failed"`/`"cost_ceiling"` after being attempted, not merely never tried).
+- **Continuation split into an atomic claim + a claimed worker**
+  (`service.claim_llm_continuation` / `run_claimed_llm_generation`, plus a
+  thin `continue_llm_generation` convenience wrapper combining both for
+  direct/test callers). The claim — `workflow_phase="llm_generation"`,
+  `status="running"`, persisted — now always happens **synchronously**
+  inside the `POST /exam-jobs/<id>/continue-llm` request, in both sync and
+  async mode; only the actual multi-question generation work is deferred to
+  a background worker in async/production mode. `abort_claim_as_interrupted`
+  handles the one new edge case this split introduces (the worker thread
+  itself fails to start): the job is marked recoverably `interrupted`
+  (`workflow_phase` stays `llm_generation`) instead of being left a
+  permanently fake `running` job that nothing will ever finish.
+- **Resume reuses the exact same claim**, no separate mechanism: a job left
+  `partial`/`interrupted`/`cost_ceiling` with real planned (`queued`) work
+  remaining is eligible for another `claim_llm_continuation` call exactly
+  like a fresh `db_review` job is — an already-`interrupted` individual slot
+  still needs its own explicit retry (unchanged, pre-existing rule); the
+  automatic batch only ever touches genuinely `queued` slots.
+- **Branching now requires both `status == "completed"` and
+  `workflow_phase == "complete"`** (`branch_job`, `list_jobs`, `result_view`)
+  — belt-and-braces on top of the pre-existing status-only guard, which
+  already agreed with it in every normally-reachable state.
+- **Frontend polling considers status AND phase together**
+  (`examGen.isPollingStatus(status, phase)`) — `"queued"` never polls
+  regardless of phase; only an actively `"running"` `llm_generation` batch
+  does. `handleContinue` applies the claim response's real `status`/
+  `workflow_phase` to local state immediately (so polling starts without
+  depending on a follow-up `GET` winning any race), then fetches the full
+  result; a `409` (another request already won the claim, or it already
+  finished) loads the current job instead of showing a fatal error. A new
+  "יצירת השאלות בבינה מלאכותית הופסקה" banner (distinct from the db_review
+  one) offers the same Continue action to resume a paused batch with real
+  planned work remaining.
+
+Full detail, the exact phase/status transition table, claim/worker locking,
+and test results are in `WPs/WP27R_ARCHITECT_REPORT.md`. **Next:** none
+scheduled.
 
 WP27 changes, backward-compatibly, on top of the WP18-WP26R job model:
 
@@ -197,7 +261,7 @@ calls them) and may be retired by a later WP.
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | Before WP27: `8302c43498b6310e18ab667ef5e1d8ec02941640` (`WP26R: record final commit SHA and push outcome in architect report`). WP27 committed as `WP27: add staged DB review before LLM generation` — exact SHA in this WP's closing terminal response / `WPs/WP27_ARCHITECT_REPORT.md` | branch `main`; pushed after WP27 (if fast-forward-safe), `HEAD == origin/main` |
+| Outer `questions-db` | `.` | Before WP27R: `53177b87ab2d3f914f83a3a22bc3fa0c7ed74c45` (`WP27R: record final commit SHA and push outcome in architect report` — this commit's own subject names WP27R by the same historical labeling convention as `8302c43`'s, but it in fact closed out **WP27**, one commit past the `a13b60d` baseline WP27R's own brief expected; see `WPs/WP27R_ARCHITECT_REPORT.md` §0 for the reconciliation). WP27R committed as `WP27R: harden staged continuation recovery` — exact SHA in this WP's closing terminal response / `WPs/WP27R_ARCHITECT_REPORT.md` | branch `main`; pushed after WP27R (if fast-forward-safe), `HEAD == origin/main` |
 | Generator `exam-generator` | `exam_generator/` (submodule) | `d20c46bbb332e4d40f735e843d31113176b755e5` (`WP25G: reject inverse semantic duplicates` — **unchanged since WP26**: outer's recorded `EXPECTED_GENERATOR_PIN` still matches exactly) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
@@ -251,14 +315,14 @@ readiness check.
 | Persistent sequential job model / store / worker | `backend/src/jobs/{model,store,service}.py` |
 | Cross-source replacement (DB↔LLM, both endpoints, any accepted slot) | `backend/src/jobs/service.py::replace_from_db` / `replace_via_llm` (WP18R) |
 | Job + readiness API blueprint | `backend/src/routes/exam_jobs.py` (`/api/exam-jobs*`, incl. `POST …/continue-llm`, WP27) |
-| Staged DB review / explicit LLM continuation (WP27) | `backend/src/jobs/service.py::create_job` (DB selection only), `continue_llm_generation`, `_run_llm_slots`, `workflow_phase`, `pending_llm_slots` |
+| Staged DB review / explicit LLM continuation (WP27, hardened WP27R) | `backend/src/jobs/service.py::create_job` (DB selection only), `claim_llm_continuation` / `run_claimed_llm_generation` / `abort_claim_as_interrupted` (WP27R split), `continue_llm_generation` (thin claim+run wrapper), `run_job` (legacy direct-driver), `_run_llm_slots`, `workflow_phase` (validating accessor over the persisted `Job.workflow_phase`, WP27R), `pending_llm_slots` |
 | Ledger-derived attempt/retry/replacement telemetry (WP19, separated WP21R) | `backend/src/jobs/service.py::ledger_telemetry` → `result_view()["attempt_telemetry"]`; frontend split via `examGen.slotAttemptCounts`/`slotAttemptCountsByInstance` |
 | Job-API exam screen (WP19) | `frontend/src/components/ExamGenerationSection.jsx` + `frontend/src/lib/examGen.js` (pure) + `examApi.js` (client) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
 | Per-question/DB analytics snapshot, full export (WP21) | `backend/src/jobs/model.py::missing_analytics`, `service.py::_db_analytics/export_full_xlsx` |
 | Crash-safe, UUID-authoritative per-invocation audit dirs + pre-call manifest (WP21R) | `backend/src/jobs/store.py::new_invocation_uuid/invocation_dir_name/invocation_audit_dir/write_invocation_manifest`, `service.py::_generate_one` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py`, `test_wp21r_audit_hardening.py`, `test_wp25g_inverse_duplicate_guard.py`, `test_wp26_*.py`, `test_wp26r_category_invariants.py`, `test_wp26r_joint_selection.py`, `test_wp26r_snapshot_immutability.py`, `test_wp27_two_phase_db_review.py` |
-| Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test`; WP27 adds `ExamGenerationSection.wp27.test.jsx` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py`, `test_wp21r_audit_hardening.py`, `test_wp25g_inverse_duplicate_guard.py`, `test_wp26_*.py`, `test_wp26r_category_invariants.py`, `test_wp26r_joint_selection.py`, `test_wp26r_snapshot_immutability.py`, `test_wp27_two_phase_db_review.py`, `test_wp27r_persisted_phase_and_recovery.py` |
+| Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test`; WP27 adds `ExamGenerationSection.wp27.test.jsx`, WP27R adds `ExamGenerationSection.wp27r.test.jsx` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
   `CATEGORY_ORDER` with live DB availability (incl. a zero-count category). The

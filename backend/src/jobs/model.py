@@ -21,15 +21,21 @@ Job states (``JOB_STATES``):
 Slot states (``SLOT_STATES``):
     queued | running | accepted | failed | interrupted | cost_ceiling
 
-WP27 §1 -- explicit two-phase workflow. Rather than a persisted field that
-would need to be kept in lockstep with ``status`` at every one of the several
-places ``status`` changes (a real desync-bug risk), the exposed
-``workflow_phase`` (``db_review`` / ``llm_generation`` / ``complete``) is a
-pure function of ``status`` (see ``service.workflow_phase``) -- explicit and
-unambiguous to every API consumer, applies identically to a WP27-created job
-and to any job persisted before WP27 existed (no migration, no rewrite of a
-historical ``job.json``), and can never drift from the ``status`` it is
-computed from.
+WP27 §1 introduced an explicit two-phase workflow (``db_review`` /
+``llm_generation`` / ``complete``) exposed as ``workflow_phase``, originally
+computed purely from ``status``. WP27R makes it a **persisted** field
+(``Job.workflow_phase``, validated against ``WORKFLOW_PHASES`` on every
+save) instead, because a derived-only phase read a stale value whenever an
+API response was built from a ``job.json`` written a moment earlier by a
+concurrent/async writer -- the persisted claim (see ``service.
+claim_llm_continuation``) is now the single source of truth a reader always
+sees, with no recomputation gap. ``Job.from_dict`` still infers a safe value
+(``_infer_legacy_workflow_phase``, in ``service.py``) for any job.json that
+predates this field or carries an unrecognized value, and never rewrites the
+file merely by loading it -- see WP27R_ARCHITECT_REPORT.md §2 for the exact
+inference rule and why it differs from a same-status lookup for a terminal
+(completed/partial/cost_ceiling/failed) legacy job that still has queued
+planned work.
 """
 
 from __future__ import annotations
@@ -47,6 +53,43 @@ JOB_STATES = (
 )
 SLOT_STATES = ("queued", "running", "accepted", "failed", "interrupted", "cost_ceiling")
 SLOT_KINDS = ("database", "llm")
+
+#: WP27R §1 -- the persisted workflow-phase values. ``status`` above still
+#: reports the fine-grained operational outcome; ``workflow_phase`` is the
+#: coarser, explicit "where is this job in the two-phase flow" signal.
+WORKFLOW_PHASES = ("db_review", "llm_generation", "complete")
+
+
+def _infer_legacy_workflow_phase(status: str, slots: list) -> str:
+    """WP27R §2 -- backward-compatible inference used ONLY by ``Job.from_dict``
+    for a job.json with no (or an unrecognized) persisted ``workflow_phase``
+    -- never used for a WP27R-written job, which always carries an explicit,
+    validated value set by the service layer at every mutation site.
+
+    Not a plain ``status`` lookup: a legacy *terminal* status (completed /
+    partial / cost_ceiling / failed) can still have a genuinely untouched
+    (``\"queued\"``) planned LLM slot left behind -- e.g. a pre-WP27R job that
+    was interrupted, had exactly its one ``interrupted`` slot retried, and
+    had its ``status`` recomputed to ``\"partial\"`` by the *old*,
+    not-yet-phase-aware ``_finalise`` while later categories' slots were
+    still sitting ``\"queued\"``, never reached. Reporting that as ``complete``
+    (a plain per-status lookup would) stealthily strands real planned work
+    behind a phase that hides Continue/resume -- exactly the WP27R
+    incident. The rule here instead asks the only question that actually
+    matters: is there a planned LLM slot nobody has attempted yet?
+    """
+    has_any_llm = any(s.kind == "llm" for s in slots)
+    has_pending_llm = any(s.kind == "llm" and s.status == "queued" for s in slots)
+    if status == "queued":
+        return "db_review" if has_any_llm else "complete"
+    if status in ("running", "interrupted"):
+        return "llm_generation" if has_any_llm else "complete"
+    # completed / partial / cost_ceiling / failed / any other historical
+    # terminal status: conservative -- never strand untouched planned work
+    # behind "complete", never mark a genuinely-finished job anything but
+    # "complete" (which also keeps it non-editable/non-resumable, matching
+    # every branch-guard and continue-eligibility check unchanged).
+    return "llm_generation" if has_pending_llm else "complete"
 
 SCHEMA_VERSION = 1
 
@@ -192,6 +235,11 @@ class CategoryPlan:
 class Job:
     job_id: str
     status: str = "queued"
+    #: WP27R §1 -- persisted explicit workflow phase (``WORKFLOW_PHASES``).
+    #: The service layer sets this at every mutation site that can change it
+    #: (creation, claim, finalisation, retry); ``to_dict`` refuses to
+    #: serialize an unrecognized value (see ``to_dict``'s validation).
+    workflow_phase: str = "db_review"
     created_utc: str = field(default_factory=now_iso)
     updated_utc: str = field(default_factory=now_iso)
     schema: int = SCHEMA_VERSION
@@ -274,10 +322,20 @@ class Job:
 
     # ----- serialization ----------------------------------------------
     def to_dict(self) -> dict:
+        # WP27R §1 -- "validate ... on save": a job is never persisted with
+        # an unrecognized workflow_phase (catches an internal service-layer
+        # bug loudly, at the point of writing, rather than silently writing
+        # bad state to disk).
+        if self.workflow_phase not in WORKFLOW_PHASES:
+            raise ValueError(
+                f"job {self.job_id}: invalid workflow_phase {self.workflow_phase!r} "
+                f"(must be one of {WORKFLOW_PHASES})"
+            )
         return {
             "job_id": self.job_id,
             "schema": self.schema,
             "status": self.status,
+            "workflow_phase": self.workflow_phase,
             "created_utc": self.created_utc,
             "updated_utc": self.updated_utc,
             "cost_ceiling_usd": self.cost_ceiling_usd,
@@ -301,10 +359,24 @@ class Job:
     @classmethod
     def from_dict(cls, d: dict) -> "Job":
         job_id = d["job_id"]
+        status = d.get("status", "queued")
+        slots = [Slot.from_dict(s) for s in d.get("slots", [])]
+        # WP27R §1/§2 -- "validate ... on load": only a recognized persisted
+        # value is trusted directly; anything absent (every pre-WP27R job)
+        # or unrecognized (defensive) falls back to the legacy inference
+        # rule. Merely loading never rewrites the file -- the field appears
+        # on disk only the next time this job is legitimately mutated and
+        # saved by the service layer.
+        raw_phase = d.get("workflow_phase")
+        workflow_phase = (
+            raw_phase if raw_phase in WORKFLOW_PHASES
+            else _infer_legacy_workflow_phase(status, slots)
+        )
         return cls(
             job_id=job_id,
             schema=d.get("schema", SCHEMA_VERSION),
-            status=d.get("status", "queued"),
+            status=status,
+            workflow_phase=workflow_phase,
             created_utc=d.get("created_utc", now_iso()),
             updated_utc=d.get("updated_utc", now_iso()),
             cost_ceiling_usd=str(d.get("cost_ceiling_usd", "5.00")),
@@ -312,7 +384,7 @@ class Job:
             cost_basis=d.get("cost_basis", "none"),
             request=d.get("request", {}),
             categories=[CategoryPlan.from_dict(c) for c in d.get("categories", [])],
-            slots=[Slot.from_dict(s) for s in d.get("slots", [])],
+            slots=slots,
             category_history=d.get("category_history", {}),
             cost_ledger=d.get("cost_ledger", []),
             pricing_verification=d.get("pricing_verification", {}),

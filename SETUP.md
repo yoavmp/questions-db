@@ -263,6 +263,18 @@ DB review. A DB-review exam is saved and reopenable indefinitely, exactly
 like any other exam in the history list; "יצירת גרסה חדשה" (branching) stays
 disabled until the exam is fully complete.
 
+**WP27R:** the Continue step's claim is now committed to disk *before* the
+button's request even returns, so reopening or refreshing the page always
+shows the true state — never a stale "waiting" screen for a batch that has
+actually already started. If AI generation stops partway through (the
+backend restarted, or the cost ceiling was reached before every planned
+question was tried), the exam shows a distinct "יצירת השאלות בבינה מלאכותית
+הופסקה" (AI question generation was paused) banner with its own **"המשך
+ליצירת שאלות חדשות באמצעות בינה מלאכותית"** button — pressing it resumes
+exactly the remaining planned questions; nothing already generated is ever
+redone. A single failed/paused question can also be retried on its own from
+the per-topic progress list, independently of resuming the whole batch.
+
 ## Question Categories - קטגוריות שאלות
 
 A question's **full category list** (`categories`) is the only thing that

@@ -278,6 +278,7 @@ describe('start / persistence / polling', () => {
       .mockResolvedValueOnce(
         makeView({
           status: 'running',
+          workflow_phase: 'llm_generation', // WP27R: polling needs status+phase together
           questions: [dbQuestion(1, 'iid-db')], // partial: DB accepted, LLM pending
           categories: {
             מבוא: {

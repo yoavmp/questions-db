@@ -265,14 +265,20 @@ describe('orderQuestions / stripJobMetadata', () => {
 })
 
 describe('status helpers', () => {
-  it('classifies polling vs terminal', () => {
-    // WP27: "queued" is now the long-lived db_review resting state (nothing
-    // running) -- only an actively running batch is polled.
-    expect(isPollingStatus('running')).toBe(true)
-    for (const s of ['queued', 'completed', 'partial', 'interrupted', 'cost_ceiling', 'failed']) {
-      expect(isPollingStatus(s)).toBe(false)
+  it('classifies polling vs terminal -- status AND phase together (WP27R)', () => {
+    // only an ACTIVELY RUNNING llm_generation batch polls
+    expect(isPollingStatus('running', 'llm_generation')).toBe(true)
+    // "queued" (db_review) never polls, regardless of phase
+    expect(isPollingStatus('queued', 'db_review')).toBe(false)
+    // a paused/recoverable llm_generation state does not poll on its own --
+    // only resuming it (which flips status back to "running") does
+    for (const s of ['partial', 'interrupted', 'cost_ceiling']) {
+      expect(isPollingStatus(s, 'llm_generation')).toBe(false)
     }
+    // "running" with an inconsistent/complete phase never polls either
+    expect(isPollingStatus('running', 'complete')).toBe(false)
     for (const s of ['completed', 'partial', 'interrupted', 'cost_ceiling', 'failed']) {
+      expect(isPollingStatus(s, 'complete')).toBe(false)
       expect(isTerminalStatus(s)).toBe(true)
     }
   })

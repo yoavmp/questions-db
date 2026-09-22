@@ -22,8 +22,17 @@ WP27: ``POST /exam-jobs`` no longer starts LLM generation automatically -- it
 only selects DB questions and persists the job (``db_review``, or
 ``completed`` immediately if no LLM work was ever planned). The new
 ``POST /exam-jobs/<job_id>/continue-llm`` is the one explicit operation that
-claims and runs the originally-planned LLM batch; it follows the exact same
-``EXAM_JOB_SYNC`` / background-thread duality as job creation.
+claims and runs the originally-planned LLM batch.
+
+WP27R: the claim itself (``workflow_phase="llm_generation"``,
+``status="running"``, persisted) now always happens SYNCHRONOUSLY inside the
+``continue-llm`` request, in both sync and async mode -- only the actual
+generation work is deferred to a background worker in async/production mode.
+This closes a race where an async ``202`` could be followed by a read of the
+stale pre-claim ``db_review`` state. ``workflow_phase`` is also now a
+persisted ``Job`` field (validated on load/save), not recomputed from
+``status`` on every read -- see ``src/jobs/model.py`` and
+``WPs/WP27R_ARCHITECT_REPORT.md``.
 """
 
 from __future__ import annotations
@@ -85,53 +94,67 @@ def create_job():
 
 @exam_jobs_bp.route("/exam-jobs/<job_id>/continue-llm", methods=["POST"])
 def continue_llm(job_id):
-    """WP27 §3: claim and run the originally-planned LLM batch for a job
-    currently awaiting DB-review approval (or resume one left ``interrupted``
-    by a restart mid-batch). Follows the exact same ``EXAM_JOB_SYNC`` /
-    background-thread duality as ``POST /exam-jobs`` -- the response body is
-    always the same small shape; the caller re-fetches ``GET /exam-jobs/<id>``
-    for the full (possibly still-in-progress) result, exactly like job
-    creation already does.
+    """WP27R §3/§4: claim the originally-planned LLM batch for a job
+    currently awaiting DB-review approval -- or resume one left
+    ``partial``/``interrupted``/``cost_ceiling`` with real planned work still
+    remaining -- SYNCHRONOUSLY inside this request, in every mode, sync or
+    async. The claim is fully persisted (``workflow_phase="llm_generation"``,
+    ``status="running"``) before this function ever returns a ``202`` --
+    there is no window where the response can be followed by a read of the
+    stale pre-claim state, and no window where a second concurrent request
+    can also believe it froze a fresh claim (the same claim/lock discipline
+    ``service.claim_llm_continuation`` uses for every caller serializes
+    that). Only the actual multi-question generation work is deferred to a
+    background worker in production (``EXAM_JOB_SYNC`` off); the claim
+    itself never is.
     """
     pf = _provider_factory()
-    if current_app.config.get("EXAM_JOB_SYNC"):
-        try:
-            job = service.continue_llm_generation(job_id, provider_factory=pf)
-        except service.JobError as exc:
-            return _err(str(exc), 404 if "not found" in str(exc) else 400)
-        except service.JobBusy as exc:
-            return _err(str(exc), 409)
-        except service.JobConflict as exc:
-            return _err(str(exc), 409)
-        body = {
-            "job_id": job.job_id,
-            "status": job.status,
-            "workflow_phase": service.workflow_phase(job),
-            "url": url_for("exam_jobs.get_job", job_id=job.job_id, _external=False),
-        }
-        return jsonify(body), 202
+    try:
+        job, provider = service.claim_llm_continuation(job_id, provider_factory=pf)
+    except service.JobError as exc:
+        return _err(str(exc), 404 if "not found" in str(exc) else 400)
+    except service.JobBusy as exc:
+        return _err(str(exc), 409)
+    except service.JobConflict as exc:
+        return _err(str(exc), 409)
 
-    t = threading.Thread(
-        target=_continue_bg, args=(job_id, pf), name=f"exam-continue-{job_id[:8]}", daemon=True,
-    )
-    t.start()
+    # claim succeeded and is already persisted -- everything from here only
+    # decides HOW the actual generation work runs, never WHETHER the claim
+    # happened; the response body below reflects the real, already-true state.
+    if current_app.config.get("EXAM_JOB_SYNC"):
+        job = service.run_claimed_llm_generation(job_id, provider=provider)
+    else:
+        try:
+            t = threading.Thread(
+                target=_run_claimed_bg, args=(job_id, provider),
+                name=f"exam-continue-{job_id[:8]}", daemon=True,
+            )
+            t.start()
+        except Exception:  # noqa: BLE001 -- WP27R §3: never leave a fake "running" job
+            service.abort_claim_as_interrupted(job_id)
+            return _err(
+                "failed to start the LLM continuation worker; "
+                "the job is left interrupted and retryable", 500,
+            )
+
     body = {
-        "job_id": job_id,
-        "status": "running",
-        "workflow_phase": "llm_generation",
-        "url": url_for("exam_jobs.get_job", job_id=job_id, _external=False),
+        "job_id": job.job_id,
+        "status": job.status,
+        "workflow_phase": service.workflow_phase(job),
+        "url": url_for("exam_jobs.get_job", job_id=job.job_id, _external=False),
     }
     return jsonify(body), 202
 
 
-def _continue_bg(job_id, provider_factory):
+def _run_claimed_bg(job_id, provider):
     try:
-        service.continue_llm_generation(job_id, provider_factory=provider_factory)
-    except (service.JobBusy, service.JobError, service.JobConflict):
-        pass  # a benign, expected outcome of a race/readiness gate -- not a bug
-    except Exception:  # noqa: BLE001 - never crash the daemon thread
+        service.run_claimed_llm_generation(job_id, provider=provider)
+    except Exception:  # noqa: BLE001 - never crash the daemon thread (locks are
+        # already released by run_claimed_llm_generation's own finally even
+        # on this path -- this only guards against an unexpected internal
+        # error propagating out of the thread target)
         import logging
-        logging.getLogger("exam_jobs").exception("continue-llm background job %s failed", job_id)
+        logging.getLogger("exam_jobs").exception("continue-llm background worker %s failed", job_id)
 
 
 @exam_jobs_bp.route("/exam-jobs/<job_id>/branch", methods=["POST"])

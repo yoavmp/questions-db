@@ -591,10 +591,13 @@ export default function ExamGenerationSection() {
 
   const isReadOnly = !!viewedJobId && viewedJobId !== activeJobId
 
-  // polling while the ACTIVE job (and only the active job) is queued/running.
+  // WP27R: polling while the ACTIVE job is actively running an llm_generation
+  // batch -- status and phase considered together, never status alone (a
+  // db_review "queued" job, or a paused/recoverable llm_generation one, must
+  // never poll on its own).
   useEffect(() => {
     if (isReadOnly || !viewedJobId || !job) return undefined
-    if (!isPollingStatus(job.status)) return undefined
+    if (!isPollingStatus(job.status, workflowPhase(job))) return undefined
     let cancelled = false
     const tick = async () => {
       try {
@@ -610,7 +613,7 @@ export default function ExamGenerationSection() {
       cancelled = true
       clearInterval(h)
     }
-  }, [viewedJobId, job?.status, isReadOnly])
+  }, [viewedJobId, job?.status, job?.workflow_phase, isReadOnly])
 
   const editRow = useCallback((name, field, value) => {
     setRows((prev) => ({
@@ -718,17 +721,44 @@ export default function ExamGenerationSection() {
 
   // WP27 -- the explicit continuation: claim + start the originally-planned
   // LLM batch. Protected against repeat clicks the same way handleStart is.
+  // WP27R §6/§4: the backend claim is synchronous and already persisted by
+  // the time this response arrives -- apply its real, honest status/phase
+  // immediately so polling starts on its own (via the effect above), with no
+  // dependency on a follow-up GET winning any scheduling race against the
+  // (already-started) worker.
   const handleContinue = async () => {
     if (isReadOnly || continuingRef.current) return
     continuingRef.current = true
     setContinuing(true)
     setError('')
     try {
-      await api.continueLlm(viewedJobId)
-      setJob(await api.fetchJob(viewedJobId))
+      const res = await api.continueLlm(viewedJobId)
+      // the optimistic merge alone is what guarantees polling starts (via
+      // the effect above) with no dependency on any race -- it applies
+      // BEFORE the full-result fetch below, which supplies the actual
+      // question list (continue-llm's own response is a small status-only
+      // body, same shape as job creation's).
+      setJob((prev) => ({ ...(prev || {}), status: res.status, workflow_phase: res.workflow_phase }))
+      try {
+        setJob(await api.fetchJob(viewedJobId))
+      } catch {
+        /* transient -- the optimistic status above still applies, and
+           polling (if the state is "running") will retry shortly */
+      }
       refreshJobsList()
     } catch (e) {
-      setError(e.message || 'תחילת יצירת השאלות בבינה מלאכותית נכשלה')
+      if (e.status === 409) {
+        // someone else legitimately won the claim (or it already finished
+        // between our render and this click) -- not a fatal error: load the
+        // current state and let it render/poll normally instead.
+        try {
+          setJob(await api.fetchJob(viewedJobId))
+        } catch (e2) {
+          setError(e2.message || 'תחילת יצירת השאלות בבינה מלאכותית נכשלה')
+        }
+      } else {
+        setError(e.message || 'תחילת יצירת השאלות בבינה מלאכותית נכשלה')
+      }
     } finally {
       continuingRef.current = false
       setContinuing(false)
@@ -926,6 +956,13 @@ export default function ExamGenerationSection() {
   const status = job?.status || 'queued'
   const phase = workflowPhase(job)
   const isDbReview = phase === 'db_review'
+  // WP27R §6: an llm_generation batch that was cut short (interrupted by a
+  // restart, stopped at the cost ceiling, or partially traversed) with real
+  // planned work still remaining -- exposes the same Continue action to
+  // resume it, distinct from the DB-review banner (nothing has run yet vs.
+  // something ran and paused).
+  const needsResume =
+    phase === 'llm_generation' && status !== 'running' && (job?.pending_llm_total ?? 0) > 0
   const totals = job?.totals || {}
   const questions = orderQuestions(job?.questions || [])
   const cats = job?.categories || {}
@@ -989,6 +1026,36 @@ export default function ExamGenerationSection() {
               data-testid="continue-llm-button"
             >
               {continuing ? 'מתחיל ביצירת שאלות...' : 'המשך ליצירת שאלות חדשות באמצעות בינה מלאכותית'}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* WP27R -- a batch that ran and paused (restart/cost-ceiling/partial),
+          with real planned work still remaining: distinct from db_review
+          (something already ran here), same Continue/resume action. */}
+      {needsResume && (
+        <div
+          className="hebrew-text bg-orange-50 border border-orange-200 text-orange-900 p-4 rounded space-y-3"
+          data-testid="resume-banner"
+        >
+          <p className="font-semibold">יצירת השאלות בבינה מלאכותית הופסקה</p>
+          <p className="text-sm">
+            חלק מהשאלות המתוכננות בבינה מלאכותית טרם נוצרו. ניתן להמשיך וליצור
+            את השאלות שנותרו, או לנסות שוב משבצת ספציפית שנכשלה בהמשך המסך.
+          </p>
+          <p className="text-sm">
+            שאלות בינה מלאכותית שנותרו: {job?.pending_llm_total ?? 0} · עלות
+            בינה מלאכותית מצטברת עד כה: {formatUSD(job?.accumulated_cost_usd || 0)}
+          </p>
+          {!isReadOnly && (
+            <Button
+              className="hebrew-text"
+              disabled={continuing || anyBusy}
+              onClick={handleContinue}
+              data-testid="resume-llm-button"
+            >
+              {continuing ? 'ממשיך...' : 'המשך ליצירת שאלות חדשות באמצעות בינה מלאכותית'}
             </Button>
           )}
         </div>
@@ -1275,7 +1342,7 @@ export default function ExamGenerationSection() {
             <p className="hebrew-text text-gray-500" data-testid="empty-questions-message">
               {isDbReview
                 ? 'לא נבחרו שאלות מהמאגר עבור מבחן זה (A=0). ניתן להמשיך ליצירת שאלות חדשות בבינה מלאכותית.'
-                : isPollingStatus(status)
+                : isPollingStatus(status, phase)
                   ? 'עדיין אין שאלות שהתקבלו...'
                   : 'לא התקבלו שאלות.'}
             </p>

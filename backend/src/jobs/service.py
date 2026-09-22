@@ -36,7 +36,9 @@ from src.integration.readiness import readiness_report
 from src.integration.request_contract import RequestContractError, parse_category_request
 from src.jobs import naming, store
 from src.jobs.exclusions import ExclusionParseError, revalidate_ids
-from src.jobs.model import CategoryPlan, Job, Slot, SEVEN, missing_analytics, new_id, now_iso
+from src.jobs.model import (
+    CategoryPlan, Job, Slot, SEVEN, WORKFLOW_PHASES, missing_analytics, new_id, now_iso,
+)
 from src.utils.category_order import CATEGORY_ORDER
 
 log = logging.getLogger("exam_jobs")
@@ -76,40 +78,26 @@ def pending_llm_slots(job: Job) -> list:
 
 
 def workflow_phase(job: Job) -> str:
-    """The explicit three-value WP27 workflow phase, derived deterministically
-    from ``job.status`` alone (bar one legacy corner case) -- see the module
-    docstring in ``model.py`` for why this is a pure function rather than a
-    persisted field.
+    """WP27R §1: a thin, validating accessor over the PERSISTED
+    ``job.workflow_phase`` -- no longer a derivation from ``status`` (that
+    was WP27's original design; WP27R replaced it because a derived-only
+    phase, recomputed fresh on every read, could observe a stale ``status``
+    whenever a reader raced a concurrent/async writer -- see
+    WP27R_ARCHITECT_REPORT.md §2 for the incident this fixes).
 
-        "db_review"      -- status == "queued" and at least one LLM slot
-                             exists: nothing has run yet, Continue is
-                             available (WP27 §1/§8).
-        "llm_generation" -- status in ("running", "interrupted"): the
-                             automatic batch is active, or was interrupted
-                             and can resume (WP27 §3's "Reuse the existing
-                             interrupted/retry model").
-        "complete"       -- every other status (completed/partial/
-                             cost_ceiling/failed): the originally planned LLM
-                             phase is finished, whatever its outcome; OR
-                             status == "queued" with no LLM slot at all --
-                             a legacy (pre-WP27) DB-only job that never even
-                             reached ``run_job`` has nothing left to plan or
-                             review, so it reads as done rather than
-                             perpetually "awaiting approval" for zero
-                             planned items (WP27 §8: "If B=0, show the job as
-                             completed and omit Continue" applies uniformly,
-                             including to this rare legacy edge case).
-
-    Applies identically to a WP27-created job and to any job persisted
-    before WP27 existed -- never inferred from slot *contents* (question
-    text, counts), only from ``status`` and whether an LLM slot exists at
-    all.
+    ``Job.from_dict`` already guarantees ``job.workflow_phase`` is always one
+    of ``WORKFLOW_PHASES`` -- inferring it once, safely, for any legacy job
+    that predates this field (see ``model._infer_legacy_workflow_phase``) --
+    so this function's job is simply to read it back, with one last defensive
+    validation in case some code path ever set it to something else in
+    memory without going through ``Job.to_dict``'s own guard.
     """
-    if job.status == "queued":
-        return "db_review" if any(s.kind == "llm" for s in job.slots) else "complete"
-    if job.status in ("running", "interrupted"):
-        return "llm_generation"
-    return "complete"
+    if job.workflow_phase not in WORKFLOW_PHASES:
+        raise ValueError(
+            f"job {job.job_id}: invalid workflow_phase {job.workflow_phase!r} "
+            f"(must be one of {WORKFLOW_PHASES})"
+        )
+    return job.workflow_phase
 
 
 # --------------------------------------------------------------------------- #
@@ -386,12 +374,14 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
 
     job.category_history = {req.category: [] for req, _ in parsed}
 
-    # WP27 §2 edge case -- if nothing is planned to generate, the job is done
-    # the moment DB selection finishes: persist ``completed`` immediately
-    # (workflow_phase == "complete"), no Continue button ever exposed. If any
-    # LLM work is planned (even with zero DB questions selected -- WP27's
-    # A=0/B>0 case), the job stays "queued" == "db_review": nothing else runs
-    # until the explicit continuation is claimed.
+    # WP27R §1 -- ``Job.workflow_phase`` defaults to "db_review" (the Job()
+    # call above never overrides it), matching the fresh job built here when
+    # any LLM work is planned: nothing else runs until the explicit
+    # continuation is claimed. If nothing is planned to generate, the job is
+    # done the moment DB selection finishes -- ``_finalise`` (below) sets
+    # both ``status="completed"`` and ``workflow_phase="complete"`` in one
+    # place, no Continue ever exposed. WP27's A=0/B>0 case (zero DB, some
+    # LLM planned) stays "db_review" the same way -- LLM count alone decides.
     total_llm = sum(req.llm for req, _ in parsed)
     if total_llm == 0:
         _finalise(job, stopped_by_ceiling=False)
@@ -636,6 +626,11 @@ def run_job(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) 
             raise JobBusy("job is locked by another process")
 
         job.status = "running"
+        # WP27R §1: legacy/direct-driven callers (this function, unlike
+        # ``claim_llm_continuation``) still flip ``workflow_phase`` here too,
+        # so every job this function ever touches stays phase-consistent
+        # even though it never goes through the new claim/worker split.
+        job.workflow_phase = "llm_generation"
         store.save(job)
 
         provider = provider_factory() if provider_factory else None
@@ -652,40 +647,43 @@ def run_job(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) 
 
 
 # --------------------------------------------------------------------------- #
-# WP27 §3 -- the one explicit continuation operation
+# WP27R §3 -- continuation split into an atomic claim and a claimed worker
 # --------------------------------------------------------------------------- #
-def continue_llm_generation(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) -> Job:
-    """Claim and run the originally-planned LLM batch for a job currently
-    awaiting DB-review approval (or resume one already claimed but left
-    ``interrupted`` by a restart), using the exact same per-slot pipeline
-    ``run_job`` always has.
+def claim_llm_continuation(
+    job_id: str, *, provider_factory: Optional[ProviderFactory] = None,
+) -> tuple[Job, Any]:
+    """Atomically validate and claim a job's planned LLM batch.
 
-    Exactly-once / idempotent (WP27 §3): the precondition
-    (``status in (\"queued\", \"interrupted\")`` and at least one still-
-    ``queued`` LLM slot) is checked and the claim (``status=\"running\"``,
-    persisted) happens while holding the same process-wide ``_RUN_LOCK`` +
-    per-job file lock every other generating operation already uses -- so two
-    concurrent callers can never both pass the check:
+    On success, returns ``(job, provider)`` with the job ALREADY persisted as
+    ``workflow_phase=\"llm_generation\"``, ``status=\"running\"`` -- and with
+    the process-wide ``_RUN_LOCK`` and the per-job file lock BOTH STILL HELD.
+    This is deliberate (WP27R §3: "must not create a gap where another
+    mutation can alter the same job after claim but before the worker
+    obtains protection"): the ONLY correct continuations from here are
+    exactly one subsequent call to ``run_claimed_llm_generation`` (the normal
+    path) or, if a worker could not even be started, to
+    ``abort_claim_as_interrupted`` -- never anything else, and never a second
+    call to this function for the same claim. Any thread may release a
+    ``threading.Lock`` it did not itself acquire, so handing the held locks
+    from this call (typically the request thread) to a spawned background
+    worker thread is safe and leaves no gap for another mutation to observe
+    or alter the job in between.
 
-    * a request truly concurrent with an active run gets ``JobBusy`` (409);
-    * a request once the job has already left ``db_review``/``interrupted``
-      (claimed by another call, or already terminal) gets ``JobConflict``
-      (409) -- it can never reset or replay the batch;
-    * a restart mid-batch leaves the job ``interrupted`` (``store.
-      recover_on_start``, unchanged) with every not-yet-``queued``-again slot
-      exactly as it was -- an already-accepted slot is never regenerated
-      (``_run_llm_slots`` only ever touches ``status == \"queued\"`` slots),
-      and a later call here (job still ``interrupted``) resumes the SAME
-      batch rather than starting a new one, reusing ``run_job``'s own
-      ``queued``/``interrupted`` precondition and per-slot ``queued``-only
-      selection verbatim -- no separate resume mechanism needed.
+    Eligible starting points:
 
-    Readiness/pricing/API-key readiness (WP27 §3/§8) is checked once, up
-    front -- mirroring ``_run_llm_slots``'s own per-slot gate, bypassed only
-    when a provider is injected (tests) -- but here a failure raises BEFORE
-    any state is persisted, so the job is left in ``db_review``/
-    ``interrupted`` completely untouched, Continue safely retryable once the
-    environment is fixed.
+    * ``workflow_phase == \"db_review\"`` (``status == \"queued\"``) -- the
+      first claim;
+    * ``workflow_phase == \"llm_generation\"`` and ``status != \"running\"``
+      (i.e. ``partial``/``interrupted``/``cost_ceiling`` with real planned
+      work still ``\"queued\"``) -- resuming a batch that was cut short,
+      reusing the exact same claim path rather than a separate mechanism.
+
+    Readiness/pricing/API-key readiness (WP27 §3/§8, WP27R §3) is checked
+    once, up front, inside the held lock -- but BEFORE any state is
+    persisted, so a failure raises with the job completely untouched (still
+    ``db_review``/recoverable ``llm_generation``), Continue safely retryable
+    once the environment is fixed, and both locks released by this same call
+    (see the ``except`` below) rather than left dangling.
     """
     if not _RUN_LOCK.acquire(blocking=False):
         raise JobBusy("another exam-generation operation is already running")
@@ -694,13 +692,23 @@ def continue_llm_generation(job_id: str, *, provider_factory: Optional[ProviderF
         job = store.load(job_id)
         if job is None:
             raise JobError(f"job {job_id} not found")
-        if job.status not in ("queued", "interrupted"):
-            raise JobConflict(
-                f"job is {job.status!r}; LLM continuation is only available while "
-                "awaiting DB-review approval or resuming an interrupted continuation"
-            )
+
+        phase = job.workflow_phase
+        if phase == "db_review":
+            if job.status != "queued":
+                raise JobConflict(f"job is {job.status!r}; expected queued for db_review")
+        elif phase == "llm_generation":
+            # unreachable in practice (an active worker would already hold
+            # _RUN_LOCK, which we just acquired above) -- kept as an explicit,
+            # documented invariant check rather than a silent assumption.
+            if job.status == "running":
+                raise JobConflict("a continuation is already running for this job")
+        else:
+            raise JobConflict("job has no planned LLM work to continue")
+
         if not pending_llm_slots(job):
             raise JobConflict("job has no planned LLM work to continue")
+
         got_file_lock = store.try_acquire_lock(job_id)
         if not got_file_lock:
             raise JobBusy("job is locked by another process")
@@ -713,10 +721,34 @@ def continue_llm_generation(job_id: str, *, provider_factory: Optional[ProviderF
                     "LLM generation is not ready: " + "; ".join(report["blocking_reasons"])
                 )
 
-        # the claim itself: persisted BEFORE the first provider call (WP27 §3)
+        # the claim itself: persisted BEFORE returning / before any provider
+        # call (WP27 §3, hardened by WP27R §3/§4 to also be synchronous with
+        # the HTTP request that triggered it -- see routes/exam_jobs.py).
+        job.workflow_phase = "llm_generation"
         job.status = "running"
         store.save(job)
+        return job, provider
+    except Exception:
+        if got_file_lock:
+            store.release_lock(job_id)
+        _RUN_LOCK.release()
+        raise
 
+
+def run_claimed_llm_generation(job_id: str, *, provider: Any) -> Job:
+    """Run a just-claimed batch to a terminal (or, on an unexpected crash
+    mid-call, recoverably ``interrupted`` -- unchanged crash story, see
+    ``store.recover_on_start``) outcome.
+
+    MUST be called exactly once, immediately after a successful
+    ``claim_llm_continuation`` for the SAME ``job_id``, passing the exact
+    ``provider`` it returned. Assumes (and requires) both locks are already
+    held on entry -- this function is the sole owner of releasing them, on
+    every exit path, exactly like every other lock-holding function in this
+    module.
+    """
+    try:
+        job = store.load(job_id)
         stopped_by_ceiling = _run_llm_slots(job, provider=provider)
 
         _finalise(job, stopped_by_ceiling=stopped_by_ceiling)
@@ -724,9 +756,47 @@ def continue_llm_generation(job_id: str, *, provider_factory: Optional[ProviderF
         _print_terminal_summary(job, operation="continue")
         return job
     finally:
-        if got_file_lock:
-            store.release_lock(job_id)
+        store.release_lock(job_id)
         _RUN_LOCK.release()
+
+
+def abort_claim_as_interrupted(job_id: str) -> None:
+    """WP27R §3: called ONLY when a worker could not even be started after a
+    successful ``claim_llm_continuation`` (e.g. background-thread creation
+    itself raised). Marks the job recoverably ``interrupted`` --
+    ``workflow_phase`` stays ``\"llm_generation\"`` -- instead of leaving a
+    permanently fake ``\"running\"`` job that no worker will ever finish, and
+    releases the locks the claim was holding. Mirrors ``store.
+    recover_on_start``'s own process-crash recovery, applied synchronously
+    here instead of at the next backend boot.
+    """
+    try:
+        job = store.load(job_id)
+        if job is not None and job.status == "running":
+            job.status = "interrupted"
+            job.safe_error = "worker failed to start; unfinished slots are retryable"
+            for s in job.slots:
+                if s.status == "running":
+                    s.status = "interrupted"
+            store.save(job)
+    finally:
+        store.release_lock(job_id)
+        _RUN_LOCK.release()
+
+
+def continue_llm_generation(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) -> Job:
+    """Convenience synchronous wrapper over the claim/worker split above:
+    claim, then immediately run to a terminal outcome in the calling thread.
+
+    Used directly by tests (and by the HTTP route's ``EXAM_JOB_SYNC`` path)
+    that want one call covering the whole continuation deterministically.
+    A production/async caller should use ``claim_llm_continuation`` and
+    ``run_claimed_llm_generation`` separately instead, so the claim can be
+    persisted before an HTTP response returns while the run itself happens
+    in a spawned background worker -- see ``routes/exam_jobs.py``.
+    """
+    job, provider = claim_llm_continuation(job_id, provider_factory=provider_factory)
+    return run_claimed_llm_generation(job_id, provider=provider)
 
 
 def _finalise(job: Job, *, stopped_by_ceiling: bool) -> None:
@@ -747,6 +817,23 @@ def _finalise(job: Job, *, stopped_by_ceiling: bool) -> None:
         job.status = "failed"
     else:
         job.status = "completed"
+
+    # WP27R §1/§5 -- workflow_phase tracks whether the planned automatic
+    # batch has genuinely finished TRAVERSING its work, independent of the
+    # operational ``status`` above: any slot still "queued"/"running"/
+    # "interrupted" means real planned work nobody has attempted (or fully
+    # attempted) yet, so phase stays "llm_generation" even when ``status``
+    # itself reads "partial" or "cost_ceiling" ("partial can coexist with
+    # llm_generation", "interrupted must coexist with llm_generation", "a
+    # ceiling ... must not silently pretend those slots were completed").
+    # Once every planned slot has reached a TERMINAL per-attempt outcome
+    # (accepted / failed / cost_ceiling), traversal is done and phase
+    # becomes "complete" -- even if some outcomes are individually
+    # rejected/retryable ("a terminal batch that attempted all intended
+    # slots may have phase complete even when some individual slots remain
+    # rejected/retryable"). This reuses the exact same ``pending`` set
+    # already computed for ``status`` above -- one source of truth, not two.
+    job.workflow_phase = "llm_generation" if pending else "complete"
 
     job.terminal_summary = _summary_dict(job)
 
@@ -1032,8 +1119,11 @@ def replace_via_llm(job_id: str, instance_id: str, *,
         # away from "queued", ending db_review as a side effect of an
         # unrelated manual replacement. "On success, keeps the job in
         # db_review" applies on failure too -- nothing about a manual
-        # replacement may change the workflow phase either way.
-        was_db_review = job.status == "queued"
+        # replacement may change the workflow phase either way. WP27R §1:
+        # reads the persisted ``workflow_phase`` directly rather than
+        # inferring it from ``status`` (the two still always agree by
+        # invariant, but the phase is the authoritative field now).
+        was_db_review = job.workflow_phase == "db_review"
         was_llm = slot.kind == "llm"
         snap = _snapshot_slot(slot)
         old_question = {f: slot.question[f] for f in SEVEN}
@@ -1273,7 +1363,7 @@ def result_view(job: Job) -> dict:
     view["parent_job_id"] = job.parent_job_id
     view["root_job_id"] = job.root_job_id
     view["excluded_db_ids_count"] = len(job.excluded_db_ids)
-    view["branchable"] = job.status == "completed"
+    view["branchable"] = job.status == "completed" and job.workflow_phase == "complete"
     # WP27 §1/§9 -- explicit workflow phase + how much planned LLM work is
     # still pending. `accepted_count` mirrors `list_jobs`'s existing field.
     view["workflow_phase"] = phase
@@ -1316,7 +1406,7 @@ def list_jobs() -> list[dict]:
             "parent_job_id": job.parent_job_id,
             "root_job_id": job.root_job_id,
             "excluded_db_ids_count": len(job.excluded_db_ids),
-            "branchable": job.status == "completed",
+            "branchable": job.status == "completed" and job.workflow_phase == "complete",
             # WP27 §9 -- workflow phase/user-facing status + pending planned
             # LLM count, so the saved-exam list can distinguish a job
             # awaiting DB-review approval from one still running or done.
@@ -1353,7 +1443,13 @@ def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
         parent = store.load(job_id)
         if parent is None:
             raise JobError(f"job {job_id} not found")
-        if parent.status != "completed":
+        # WP27R §5: branching requires BOTH the existing status rule AND the
+        # persisted workflow phase to agree the job is genuinely finished --
+        # the two always agree by invariant for a correctly-computed job, but
+        # checking both is a deliberate belt-and-braces guard against ever
+        # branching a job whose planned LLM batch has not actually finished
+        # traversing (db_review or a recoverable/active llm_generation).
+        if parent.status != "completed" or parent.workflow_phase != "complete":
             raise JobConflict(
                 "ניתן ליצור גרסה חדשה רק ממבחן שהושלם במלואו"
             )
@@ -1394,6 +1490,12 @@ def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
         child = Job(
             job_id=new_id(),
             status="completed",
+            # WP27R §1: a branch only ever copies ACCEPTED slots (nothing
+            # "queued"/planned survives branching) -- its workflow_phase is
+            # unambiguously "complete", never the dataclass default
+            # ("db_review"), which would otherwise wrongly hide the child's
+            # own branchability and show a stale DB-review banner for it.
+            workflow_phase="complete",
             cost_ceiling_usd=parent.cost_ceiling_usd,
             accumulated_cost_usd="0",
             cost_basis="none",

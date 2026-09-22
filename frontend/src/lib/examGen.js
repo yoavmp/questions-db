@@ -320,13 +320,16 @@ export function isTerminalStatus(status) {
   return ['completed', 'partial', 'interrupted', 'cost_ceiling', 'failed'].includes(status)
 }
 
-// WP27: "queued" is now the long-lived db_review resting state (nothing is
-// running), so it must not trigger polling on its own anymore -- only an
-// actively running batch (status === "running") does. "interrupted" is a
-// paused state that only changes on explicit user action (Continue), so it
-// is not polled either.
-export function isPollingStatus(status) {
-  return status === 'running'
+// WP27R: polling must consider workflow phase AND operational status
+// together, never status alone. "queued" is the long-lived db_review
+// resting state (nothing is running) and must never poll, regardless of
+// phase. Only an actively running llm_generation batch (status ===
+// "running") is polled -- a paused/recoverable llm_generation state
+// (partial/interrupted/cost_ceiling with real planned work left) only
+// starts polling again once the user resumes it (which flips status back
+// to "running" via the same Continue action).
+export function isPollingStatus(status, phase) {
+  return status === 'running' && phase === 'llm_generation'
 }
 
 // WP27 -- the explicit workflow phase from the backend
