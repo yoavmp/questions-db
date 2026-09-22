@@ -522,11 +522,31 @@ $ git -C exam_generator status --short
 (clean)
 ```
 
-Committed as `WP27R: harden staged continuation recovery`; pushed to
+Committed as `679a3812ef245fe9590262df18b435f1909b861b`
+(`WP27R: harden staged continuation recovery`, 14 files changed). Pushed to
 `origin/main` after confirming a safe fast-forward (`git fetch origin` +
-`git merge-base --is-ancestor origin/main HEAD`), no force, no rewrite.
-Exact resulting SHA and final `git status --short` are recorded in this
-session's closing terminal report per the brief's "Git completion" section.
+`git merge-base --is-ancestor origin/main HEAD` — the branch was exactly 1
+commit ahead, no divergence), no force, no rewrite. Final state:
+
+```
+$ git rev-parse HEAD
+679a3812ef245fe9590262df18b435f1909b861b
+$ git rev-parse origin/main
+679a3812ef245fe9590262df18b435f1909b861b
+$ git status --short
+?? WPs/PRE_WP25_LATEST_EXAM_REVIEW.md
+?? WPs/PRE_WP26R_AUDIT.md
+$ git submodule status
+ d20c46bbb332e4d40f735e843d31113176b755e5 exam_generator (heads/main)
+$ git -C exam_generator rev-parse HEAD
+d20c46bbb332e4d40f735e843d31113176b755e5
+$ git -C exam_generator status --short
+(clean)
+```
+
+`HEAD == origin/main`; the only remaining outer untracked files are the two
+pre-existing owner-owned PRE reports; the generator submodule is unchanged
+and clean.
 
 ## 12. Remaining limitations / owner decisions
 
