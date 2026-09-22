@@ -3,12 +3,89 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-16 · **Latest completed WP:** WP26R (category semantics,
-a hard exclusion-workbook row limit, and immutable saved-exam snapshots —
-outer-only, offline only, no live/provider call, `OPENAI_API_KEY` never
-accessed, generator untouched). Corrects three issues a read-only audit found
-in WP26; see `WPs/WP26R_ARCHITECT_REPORT.md`.
+**Updated:** 2026-09-22 · **Latest completed WP:** WP27 (staged DB review
+before LLM generation — outer-only, offline only, no live/provider call,
+`OPENAI_API_KEY` never accessed, generator untouched); see
+`WPs/WP27_ARCHITECT_REPORT.md`.
 Supersedes the never-executed `WP25_Named_Exam_History_Branches_And_UI_Polish.md`.
+
+WP27 changes, backward-compatibly, on top of the WP18-WP26R job model:
+
+- **Two explicit phases instead of one automatic run**
+  (`backend/src/jobs/service.py`): `POST /api/exam-jobs` now performs DB
+  selection ONLY — it never imports/checks `OPENAI_API_KEY`, never runs a
+  pricing-readiness check, and never calls the generator. A job with any
+  planned AI (LLM) question is persisted `queued`/`db_review` and simply sits
+  there, saved and reopenable indefinitely, until a new explicit
+  `POST /api/exam-jobs/<id>/continue-llm` claims and runs exactly that
+  originally-planned batch. A job with zero planned AI questions is finalised
+  `completed` immediately inside `create_job` itself — there is nothing to
+  continue, and no Continue control is ever shown for it.
+- **`workflow_phase` — a derived, not persisted, three-value field**
+  (`service.workflow_phase`, `model.py` docstring): `"db_review"` /
+  `"llm_generation"` / `"complete"`, computed purely from the existing
+  `status` field (`queued`+any LLM slot → `db_review`; `running`/
+  `interrupted` → `llm_generation`; everything else → `complete`) rather than
+  a new field kept in lockstep with `status` at every mutation site — a
+  deliberate choice to make desync between the two structurally impossible.
+  Exposed on `GET /exam-jobs`, `GET /exam-jobs/<id>` and both job-creating
+  routes' response bodies. A legacy (pre-WP27) `job.json` — which never had
+  and still doesn't need this field — maps through the exact same rule with
+  no migration and no rewrite-on-read.
+- **Exactly-once continuation** (`service.continue_llm_generation`): claims
+  the transition (`status="running"`, persisted) under the same process-wide
+  run lock + per-job file lock every other generating operation already
+  used, so a double-click or a genuinely concurrent request can never start
+  two batches; a request after the batch has already started/finished gets a
+  safe `409`. Readiness (API key/pricing/generator data) is checked once, up
+  front, and a failure there leaves the job completely untouched in
+  `db_review` — Continue stays safely retryable once the environment is
+  fixed. A backend restart mid-batch leaves it `interrupted` exactly like any
+  other WP18 job; calling Continue again resumes the same batch (only
+  still-`queued` slots run — an already-accepted slot is never regenerated),
+  reusing the existing interrupted/retry model rather than inventing a new
+  resume mechanism.
+- **Manual replacements keep working unchanged during `db_review`**
+  (`replace_from_db`/`replace_via_llm`, both already phase-agnostic — no
+  guard added): both "החלף בשאלה מהמאגר" and "צור שאלה אחרת" remain available
+  on every accepted question. A manual `replace_via_llm` call is charged
+  normally and never reduces the count Continue will later generate. One
+  real bug this WP found and fixed in the same function: it used to call the
+  shared `_finalise` helper unconditionally, which — now that other planned
+  LLM slots can legitimately still be `queued` while a manual replacement
+  runs — misread that as an in-progress/partial batch and flipped the job
+  out of `db_review` as a side effect. Fixed by skipping `_finalise`'s
+  status recomputation (keeping only its cost/telemetry summary refresh)
+  whenever the job was in `db_review` before the call.
+- **Interim vs. final numbering** (`service.result_view`/
+  `export_full_xlsx`): during `db_review`, displayed/exported question
+  numbers are a compact `1..N` over only the currently accepted questions
+  (never the persisted final number, which can have gaps wherever a later
+  category's AI slots are still pending) — no empty placeholder rows are
+  ever shown or exported. The real final number — assigned once, for every
+  slot, at creation time, in canonical category order — is stable and
+  unaffected; it is simply what gets shown again the moment `db_review`
+  ends, exactly as before WP27.
+- **Semantic context needed no code change**: `_previous_for_slot` already
+  only ever scanned *accepted* slots plus retained displaced-LLM history, so
+  a still-`queued` planned slot was already structurally invisible to it,
+  and a slot generated earlier in the same continuation batch is already
+  persisted `accepted` before the next slot's context is built — both WP27
+  requirements the existing WP18 sequential loop already satisfied.
+- **Frontend** (`ExamGenerationSection.jsx`, `examGen.js`, `examApi.js`): a
+  new "ממתין לאישור שאלות המאגר" banner (shown whenever
+  `workflow_phase === "db_review"`) with the planned AI-question count,
+  current AI cost, and the "המשך ליצירת שאלות חדשות באמצעות בינה מלאכותית"
+  button (double-click-protected, hidden for a read-only/historical view).
+  `isPollingStatus` no longer polls on `status === "queued"` (that status is
+  now a long-lived resting state, not a transient one) — only an actively
+  `"running"` batch is polled. Branching is unavailable during `db_review`/
+  `llm_generation` with an inline explanation of when it returns (unchanged
+  backend guard: only `status === "completed"`).
+
+Full detail, the exact legacy-phase mapping, idempotency/concurrency
+mechanism, and test results are in `WPs/WP27_ARCHITECT_REPORT.md`.
+**Next:** none scheduled.
 
 WP26R corrects, backward-compatibly, on top of the WP26 job model:
 
@@ -120,8 +197,8 @@ calls them) and may be retired by a later WP.
 
 | Repo | Path | SHA | State |
 |---|---|---|---|
-| Outer `questions-db` | `.` | Before WP26: `63398340b1f6d66b39bf8f6bd2995f3fe7987996` (`WP25G: integrate inverse duplicate guard`). WP26 committed as `WP26: add named exam history and exclusions` — exact SHA in this WP's closing terminal response / `WPs/WP26_ARCHITECT_REPORT.md` | branch `main`; pushed after WP26 (if fast-forward-safe), `HEAD == origin/main` |
-| Generator `exam-generator` | `exam_generator/` (submodule) | `d20c46bbb332e4d40f735e843d31113176b755e5` (`WP25G: reject inverse semantic duplicates` — **unchanged by WP26**: outer's recorded `EXPECTED_GENERATOR_PIN` still matches exactly) | `heads/main`, **fully clean**, **do not commit/push here** |
+| Outer `questions-db` | `.` | Before WP27: `8302c43498b6310e18ab667ef5e1d8ec02941640` (`WP26R: record final commit SHA and push outcome in architect report`). WP27 committed as `WP27: add staged DB review before LLM generation` — exact SHA in this WP's closing terminal response / `WPs/WP27_ARCHITECT_REPORT.md` | branch `main`; pushed after WP27 (if fast-forward-safe), `HEAD == origin/main` |
+| Generator `exam-generator` | `exam_generator/` (submodule) | `d20c46bbb332e4d40f735e843d31113176b755e5` (`WP25G: reject inverse semantic duplicates` — **unchanged since WP26**: outer's recorded `EXPECTED_GENERATOR_PIN` still matches exactly) | `heads/main`, **fully clean**, **do not commit/push here** |
 
 Generator remote: `https://github.com/yoavmp/exam-generator.git` — `origin/main`
 contains `d20c46b` (WP25G). Pre-submodule snapshot preserved at
@@ -173,14 +250,15 @@ readiness check.
 | Non-network LLM readiness service | `backend/src/integration/readiness.py` |
 | Persistent sequential job model / store / worker | `backend/src/jobs/{model,store,service}.py` |
 | Cross-source replacement (DB↔LLM, both endpoints, any accepted slot) | `backend/src/jobs/service.py::replace_from_db` / `replace_via_llm` (WP18R) |
-| Job + readiness API blueprint | `backend/src/routes/exam_jobs.py` (`/api/exam-jobs*`) |
+| Job + readiness API blueprint | `backend/src/routes/exam_jobs.py` (`/api/exam-jobs*`, incl. `POST …/continue-llm`, WP27) |
+| Staged DB review / explicit LLM continuation (WP27) | `backend/src/jobs/service.py::create_job` (DB selection only), `continue_llm_generation`, `_run_llm_slots`, `workflow_phase`, `pending_llm_slots` |
 | Ledger-derived attempt/retry/replacement telemetry (WP19, separated WP21R) | `backend/src/jobs/service.py::ledger_telemetry` → `result_view()["attempt_telemetry"]`; frontend split via `examGen.slotAttemptCounts`/`slotAttemptCountsByInstance` |
 | Job-API exam screen (WP19) | `frontend/src/components/ExamGenerationSection.jsx` + `frontend/src/lib/examGen.js` (pure) + `examApi.js` (client) |
 | Root install / start flow | `scripts/dev_install.sh`, `SETUP.md` |
 | Per-question/DB analytics snapshot, full export (WP21) | `backend/src/jobs/model.py::missing_analytics`, `service.py::_db_analytics/export_full_xlsx` |
 | Crash-safe, UUID-authoritative per-invocation audit dirs + pre-call manifest (WP21R) | `backend/src/jobs/store.py::new_invocation_uuid/invocation_dir_name/invocation_audit_dir/write_invocation_manifest`, `service.py::_generate_one` |
-| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py`, `test_wp21r_audit_hardening.py`, `test_wp25g_inverse_duplicate_guard.py`, `test_wp26_*.py`, `test_wp26r_category_invariants.py`, `test_wp26r_joint_selection.py`, `test_wp26r_snapshot_immutability.py` |
-| Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test` |
+| Contract + job tests (temp DB, fake provider, sockets blocked) | `backend/tests/test_wp17_*.py`, `test_wp18_*.py`, `test_wp18r_*.py`, `test_wp19_frontend_contract.py`, `test_wp20_semantic_history_boundary.py`, `test_wp20_terminal_cost_log.py`, `test_wp21_analytics_and_exports.py`, `test_wp21r_audit_hardening.py`, `test_wp25g_inverse_duplicate_guard.py`, `test_wp26_*.py`, `test_wp26r_category_invariants.py`, `test_wp26r_joint_selection.py`, `test_wp26r_snapshot_immutability.py`, `test_wp27_two_phase_db_review.py` |
+| Frontend tests (Vitest + Testing Library, fake API fixtures) | `frontend/src/**/*.test.{js,jsx}`; `cd frontend && npm test`; WP27 adds `ExamGenerationSection.wp27.test.jsx` |
 
 - `/api/test/categories` still returns all 20 canonical categories in
   `CATEGORY_ORDER` with live DB availability (incl. a zero-count category). The

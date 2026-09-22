@@ -54,6 +54,16 @@ export async function fetchJob(jobId) {
   return jsonOrThrow(resp) // full result_view
 }
 
+// WP27 -- claim + run the originally-planned LLM batch for a job currently
+// awaiting DB-review approval. Small response shape, same as createJob; the
+// caller re-fetches fetchJob() for the full (possibly still in-progress) result.
+export async function continueLlm(jobId) {
+  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/continue-llm`, {
+    method: 'POST',
+  })
+  return jsonOrThrow(resp) // { job_id, status, workflow_phase, url }
+}
+
 // WP26 §1 -- every persisted job, newest-first, safe list fields only.
 export async function fetchJobsList() {
   const resp = await fetch(`${API_BASE_URL}/exam-jobs`)

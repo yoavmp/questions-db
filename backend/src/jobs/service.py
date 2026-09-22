@@ -60,6 +60,59 @@ class JobConflict(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
+# WP27 §1 -- explicit two-phase workflow (derived, never a separate persisted
+# field -- see the docstring in ``model.py``)
+# --------------------------------------------------------------------------- #
+def pending_llm_slots(job: Job) -> list:
+    """Every LLM slot not yet claimed by a generation attempt -- the WP27
+    "planned but not yet generated" work. Stable identity (``slot_id``/
+    ``instance_id``, assigned at creation), never rendered/exported as a
+    question, never a failure/attempt/retry, never part of semantic context
+    (``_previous_for_slot`` only ever scans ``status == \"accepted\"`` LLM
+    slots) -- and claimed exactly once each by the sequential loop in
+    ``_run_llm_slots``, since a slot is skipped the moment its status leaves
+    ``\"queued\"``."""
+    return [s for s in job.slots if s.kind == "llm" and s.status == "queued"]
+
+
+def workflow_phase(job: Job) -> str:
+    """The explicit three-value WP27 workflow phase, derived deterministically
+    from ``job.status`` alone (bar one legacy corner case) -- see the module
+    docstring in ``model.py`` for why this is a pure function rather than a
+    persisted field.
+
+        "db_review"      -- status == "queued" and at least one LLM slot
+                             exists: nothing has run yet, Continue is
+                             available (WP27 §1/§8).
+        "llm_generation" -- status in ("running", "interrupted"): the
+                             automatic batch is active, or was interrupted
+                             and can resume (WP27 §3's "Reuse the existing
+                             interrupted/retry model").
+        "complete"       -- every other status (completed/partial/
+                             cost_ceiling/failed): the originally planned LLM
+                             phase is finished, whatever its outcome; OR
+                             status == "queued" with no LLM slot at all --
+                             a legacy (pre-WP27) DB-only job that never even
+                             reached ``run_job`` has nothing left to plan or
+                             review, so it reads as done rather than
+                             perpetually "awaiting approval" for zero
+                             planned items (WP27 §8: "If B=0, show the job as
+                             completed and omit Continue" applies uniformly,
+                             including to this rare legacy edge case).
+
+    Applies identically to a WP27-created job and to any job persisted
+    before WP27 existed -- never inferred from slot *contents* (question
+    text, counts), only from ``status`` and whether an LLM slot exists at
+    all.
+    """
+    if job.status == "queued":
+        return "db_review" if any(s.kind == "llm" for s in job.slots) else "complete"
+    if job.status in ("running", "interrupted"):
+        return "llm_generation"
+    return "complete"
+
+
+# --------------------------------------------------------------------------- #
 # DB selection (needs a Flask app context)
 # --------------------------------------------------------------------------- #
 #: WP26R §3 -- eligibility for category X is exact membership of X in the
@@ -216,13 +269,10 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
             raise JobError(f"category {name!r} is not in the canonical order")
         parsed.append((req, context_id))
 
-    any_llm = any(req.llm > 0 for req, _ in parsed)
-    if any_llm:
-        report = readiness_report()
-        if not report["ready_for_llm"]:
-            raise JobError(
-                "LLM generation is not ready: " + "; ".join(report["blocking_reasons"])
-            )
+    # WP27 §2 -- initial creation is DB selection ONLY: no readiness/pricing/
+    # API-key check here (moved to ``continue_llm_generation`` / manual
+    # ``replace_via_llm``, immediately before their own first provider call).
+    # This route must work with no ``OPENAI_API_KEY`` at all.
 
     # WP26 §1 -- structured/custom identity (optional; a job without one falls
     # back to naming.fallback_label everywhere it is displayed).
@@ -335,6 +385,17 @@ def create_job(payload: dict, *, seed: Optional[int] = None) -> Job:
         job.categories.append(plan)
 
     job.category_history = {req.category: [] for req, _ in parsed}
+
+    # WP27 §2 edge case -- if nothing is planned to generate, the job is done
+    # the moment DB selection finishes: persist ``completed`` immediately
+    # (workflow_phase == "complete"), no Continue button ever exposed. If any
+    # LLM work is planned (even with zero DB questions selected -- WP27's
+    # A=0/B>0 case), the job stays "queued" == "db_review": nothing else runs
+    # until the explicit continuation is claimed.
+    total_llm = sum(req.llm for req, _ in parsed)
+    if total_llm == 0:
+        _finalise(job, stopped_by_ceiling=False)
+
     store.save(job)
     return job
 
@@ -505,9 +566,62 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
 # --------------------------------------------------------------------------- #
 # the worker
 # --------------------------------------------------------------------------- #
+def _run_llm_slots(job: Job, *, provider: Any) -> bool:
+    """Process every currently ``queued`` LLM slot, categories in canonical
+    order, one at a time, sequential within a category. Shared by ``run_job``
+    (legacy/direct-driven callers -- every pre-WP27 test still calls this via
+    ``run_job``) and ``continue_llm_generation`` (WP27 §3). The caller must
+    already hold ``_RUN_LOCK`` + the per-job file lock and have persisted
+    ``status=\"running\"`` before calling this. Returns ``stopped_by_ceiling``.
+
+    Semantic context (WP27 §5) needs no change here: ``_previous_for_slot``
+    already scans only *currently accepted* slots (DB, and LLM with
+    ``status == \"accepted\"``) plus ``category_history`` -- a still-``queued``
+    planned slot is invisible to it by construction, and a slot generated
+    earlier in this same loop is already persisted ``accepted`` before the
+    next slot's context is built, so "earlier accepted planned LLM question
+    generated during this continuation" falls out for free from the existing
+    sequential loop.
+    """
+    stopped_by_ceiling = False
+    for plan in sorted(job.categories, key=lambda p: p.order_index):
+        if stopped_by_ceiling:
+            break
+        llm_slots = [s for s in job.slots
+                     if s.category == plan.category and s.kind == "llm" and s.status == "queued"]
+        for slot in sorted(llm_slots, key=lambda s: s.number):
+            # readiness immediately before the (billable) call
+            if provider is None:
+                report = readiness_report()
+                if not report["ready_for_llm"]:
+                    slot.status = "failed"
+                    slot.safe_error = "LLM not ready: " + "; ".join(report["blocking_reasons"])
+                    store.save(job)
+                    continue
+            result = _generate_one(
+                job, slot, kind="initial", provider=provider,
+                previous=_previous_for_slot(job, slot),
+            )
+            store.save(job)
+            if result is not None and result.status == "cost_ceiling":
+                stopped_by_ceiling = True
+                break
+            if slot.status == "cost_ceiling":
+                stopped_by_ceiling = True
+                break
+    return stopped_by_ceiling
+
+
 def run_job(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) -> Job:
     """Process every queued LLM slot, categories in canonical order, one at a
-    time. Idempotent-ish: only ``queued`` slots are generated."""
+    time. Idempotent-ish: only ``queued`` slots are generated.
+
+    Unchanged since WP18/WP26R: kept for every existing direct caller (tests
+    that drive DB selection + LLM generation as two explicit steps without
+    going through the HTTP route). WP27's ``POST /exam-jobs`` route no longer
+    calls this automatically -- see ``continue_llm_generation`` for the new
+    explicit-continuation entry point the route now uses instead.
+    """
     if not _RUN_LOCK.acquire(blocking=False):
         raise JobBusy("another exam-generation operation is already running")
     got_file_lock = False
@@ -525,37 +639,89 @@ def run_job(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) 
         store.save(job)
 
         provider = provider_factory() if provider_factory else None
-        stopped_by_ceiling = False
-
-        for plan in sorted(job.categories, key=lambda p: p.order_index):
-            if stopped_by_ceiling:
-                break
-            llm_slots = [s for s in job.slots
-                         if s.category == plan.category and s.kind == "llm" and s.status == "queued"]
-            for slot in sorted(llm_slots, key=lambda s: s.number):
-                # readiness immediately before the (billable) call
-                if provider is None:
-                    report = readiness_report()
-                    if not report["ready_for_llm"]:
-                        slot.status = "failed"
-                        slot.safe_error = "LLM not ready: " + "; ".join(report["blocking_reasons"])
-                        store.save(job)
-                        continue
-                result = _generate_one(
-                    job, slot, kind="initial", provider=provider,
-                    previous=_previous_for_slot(job, slot),
-                )
-                store.save(job)
-                if result is not None and result.status == "cost_ceiling":
-                    stopped_by_ceiling = True
-                    break
-                if slot.status == "cost_ceiling":
-                    stopped_by_ceiling = True
-                    break
+        stopped_by_ceiling = _run_llm_slots(job, provider=provider)
 
         _finalise(job, stopped_by_ceiling=stopped_by_ceiling)
         store.save(job)
         _print_terminal_summary(job, operation="initial")
+        return job
+    finally:
+        if got_file_lock:
+            store.release_lock(job_id)
+        _RUN_LOCK.release()
+
+
+# --------------------------------------------------------------------------- #
+# WP27 §3 -- the one explicit continuation operation
+# --------------------------------------------------------------------------- #
+def continue_llm_generation(job_id: str, *, provider_factory: Optional[ProviderFactory] = None) -> Job:
+    """Claim and run the originally-planned LLM batch for a job currently
+    awaiting DB-review approval (or resume one already claimed but left
+    ``interrupted`` by a restart), using the exact same per-slot pipeline
+    ``run_job`` always has.
+
+    Exactly-once / idempotent (WP27 §3): the precondition
+    (``status in (\"queued\", \"interrupted\")`` and at least one still-
+    ``queued`` LLM slot) is checked and the claim (``status=\"running\"``,
+    persisted) happens while holding the same process-wide ``_RUN_LOCK`` +
+    per-job file lock every other generating operation already uses -- so two
+    concurrent callers can never both pass the check:
+
+    * a request truly concurrent with an active run gets ``JobBusy`` (409);
+    * a request once the job has already left ``db_review``/``interrupted``
+      (claimed by another call, or already terminal) gets ``JobConflict``
+      (409) -- it can never reset or replay the batch;
+    * a restart mid-batch leaves the job ``interrupted`` (``store.
+      recover_on_start``, unchanged) with every not-yet-``queued``-again slot
+      exactly as it was -- an already-accepted slot is never regenerated
+      (``_run_llm_slots`` only ever touches ``status == \"queued\"`` slots),
+      and a later call here (job still ``interrupted``) resumes the SAME
+      batch rather than starting a new one, reusing ``run_job``'s own
+      ``queued``/``interrupted`` precondition and per-slot ``queued``-only
+      selection verbatim -- no separate resume mechanism needed.
+
+    Readiness/pricing/API-key readiness (WP27 §3/§8) is checked once, up
+    front -- mirroring ``_run_llm_slots``'s own per-slot gate, bypassed only
+    when a provider is injected (tests) -- but here a failure raises BEFORE
+    any state is persisted, so the job is left in ``db_review``/
+    ``interrupted`` completely untouched, Continue safely retryable once the
+    environment is fixed.
+    """
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise JobBusy("another exam-generation operation is already running")
+    got_file_lock = False
+    try:
+        job = store.load(job_id)
+        if job is None:
+            raise JobError(f"job {job_id} not found")
+        if job.status not in ("queued", "interrupted"):
+            raise JobConflict(
+                f"job is {job.status!r}; LLM continuation is only available while "
+                "awaiting DB-review approval or resuming an interrupted continuation"
+            )
+        if not pending_llm_slots(job):
+            raise JobConflict("job has no planned LLM work to continue")
+        got_file_lock = store.try_acquire_lock(job_id)
+        if not got_file_lock:
+            raise JobBusy("job is locked by another process")
+
+        provider = provider_factory() if provider_factory else None
+        if provider is None:
+            report = readiness_report()
+            if not report["ready_for_llm"]:
+                raise JobError(
+                    "LLM generation is not ready: " + "; ".join(report["blocking_reasons"])
+                )
+
+        # the claim itself: persisted BEFORE the first provider call (WP27 §3)
+        job.status = "running"
+        store.save(job)
+
+        stopped_by_ceiling = _run_llm_slots(job, provider=provider)
+
+        _finalise(job, stopped_by_ceiling=stopped_by_ceiling)
+        store.save(job)
+        _print_terminal_summary(job, operation="continue")
         return job
     finally:
         if got_file_lock:
@@ -614,6 +780,7 @@ def _summary_dict(job: Job) -> dict:
 #: operation code (matches ``cost_ledger`` ``kind``) -> human-readable terminal header
 _OPERATION_HEADERS = {
     "initial": "EXAM JOB COMPLETE",
+    "continue": "EXAM JOB COMPLETE",  # WP27: the (formerly automatic) LLM batch, now explicit
     "retry": "EXAM JOB UPDATED (retry)",
     "replace_llm": "EXAM JOB UPDATED (llm replace)",
 }
@@ -857,6 +1024,16 @@ def replace_via_llm(job_id: str, instance_id: str, *,
         if not got_file_lock:
             raise JobBusy("job is locked by another process")
 
+        # WP27 §4: capture BEFORE this call whether the job is currently in
+        # db_review -- other planned LLM slots are legitimately still
+        # "queued" (not yet claimed by Continue) throughout db_review, which
+        # `_finalise`'s pending-slot check would otherwise misread as an
+        # in-progress/partial batch and use to prematurely flip job.status
+        # away from "queued", ending db_review as a side effect of an
+        # unrelated manual replacement. "On success, keeps the job in
+        # db_review" applies on failure too -- nothing about a manual
+        # replacement may change the workflow phase either way.
+        was_db_review = job.status == "queued"
         was_llm = slot.kind == "llm"
         snap = _snapshot_slot(slot)
         old_question = {f: slot.question[f] for f in SEVEN}
@@ -894,7 +1071,13 @@ def replace_via_llm(job_id: str, instance_id: str, *,
             _restore_slot(slot, snap)
             slot.safe_error = reason
 
-        _finalise(job, stopped_by_ceiling=(result is not None and result.status == "cost_ceiling"))
+        if was_db_review:
+            # keep job.status == "queued" (db_review) -- only refresh the
+            # informational cost/telemetry summary (WP27 §6: terminal
+            # summaries continue after every paid operation), never job.status.
+            job.terminal_summary = _summary_dict(job)
+        else:
+            _finalise(job, stopped_by_ceiling=(result is not None and result.status == "cost_ceiling"))
         store.save(job)
         _print_terminal_summary(job, operation="replace_llm")
         return job
@@ -1028,14 +1211,33 @@ def ledger_telemetry(job: Job) -> dict:
 
 def result_view(job: Job) -> dict:
     """Full/partial exam result: accepted questions as DTO dicts in canonical
-    order with contiguous global numbers, plus job progress.
+    order, plus job progress.
 
     Note (WP19 §1): neither this view nor ``progress_view`` reports a *current*
     DB-vs-LLM composition. ``categories[*].database`` / ``.llm`` are the original
     request quotas (provenance only); per-question origin is the ``origin`` field
     on each entry of ``questions``. Replacements may move that balance freely and
     nothing here recomputes or enforces it.
+
+    WP27 §7/§9 -- numbering has two distinct meanings depending on phase:
+
+    * during ``db_review``, ``slot.number`` (the eventual full-exam number,
+      already assigned at creation time across BOTH the selected DB slots and
+      the still-``queued`` planned LLM slots -- see ``create_job``) would show
+      gaps wherever a category has planned-but-not-yet-generated LLM slots
+      interleaved before a later category's DB slots. The interim view/export
+      contract instead needs a genuinely compact ``1..N`` numbering of only
+      the currently accepted questions -- so ``d["number"]`` here is the
+      accepted-list POSITION (``pos``), display/export-only, never persisted
+      and never confused with a slot's stable ``instance_id``/``slot_id``.
+    * once Continue is claimed (``workflow_phase`` leaves ``db_review``), the
+      persisted ``slot.number`` -- already the correct final full-exam
+      number, established once at creation time and immutable across
+      generation/failure/retry/replacement -- is shown as-is again, exactly
+      as before WP27.
     """
+    phase = workflow_phase(job)
+    interim_numbering = phase == "db_review"
     dtos: list[dict] = []
     for pos, slot in enumerate(job.accepted_questions_ordered(), 1):
         if slot.kind == "database":
@@ -1052,7 +1254,7 @@ def result_view(job: Job) -> dict:
             )
             dto.instance_id = slot.instance_id
         d = dto.to_dict()
-        d["number"] = slot.number  # contiguous global number wins
+        d["number"] = pos if interim_numbering else slot.number
         dtos.append(d)
     view = job.progress_view()
     view["questions"] = dtos
@@ -1072,6 +1274,11 @@ def result_view(job: Job) -> dict:
     view["root_job_id"] = job.root_job_id
     view["excluded_db_ids_count"] = len(job.excluded_db_ids)
     view["branchable"] = job.status == "completed"
+    # WP27 §1/§9 -- explicit workflow phase + how much planned LLM work is
+    # still pending. `accepted_count` mirrors `list_jobs`'s existing field.
+    view["workflow_phase"] = phase
+    view["pending_llm_total"] = len(pending_llm_slots(job))
+    view["accepted_count"] = len(dtos)
     return view
 
 
@@ -1110,6 +1317,11 @@ def list_jobs() -> list[dict]:
             "root_job_id": job.root_job_id,
             "excluded_db_ids_count": len(job.excluded_db_ids),
             "branchable": job.status == "completed",
+            # WP27 §9 -- workflow phase/user-facing status + pending planned
+            # LLM count, so the saved-exam list can distinguish a job
+            # awaiting DB-review approval from one still running or done.
+            "workflow_phase": workflow_phase(job),
+            "pending_llm_total": len(pending_llm_slots(job)),
         })
     return out
 
@@ -1304,7 +1516,12 @@ def export_full_xlsx(job: Job) -> bytes:
     same missing-value convention (never fabricated -- WP21 §5). Never
     inserts anything into the DB; ``תאריך_יצירה`` is this export's own
     timestamp for every row, exactly as the legacy route did (it was never
-    the question's own upload date)."""
+    the question's own upload date).
+
+    WP27 §7/§9: during ``db_review`` the number column uses the same compact
+    ``1..N`` interim position as ``result_view`` (see its docstring) instead
+    of the persisted final ``slot.number``; after Continue is claimed the
+    real, stable final number is used, exactly as before WP27."""
     from io import BytesIO
 
     from openpyxl import Workbook
@@ -1314,11 +1531,12 @@ def export_full_xlsx(job: Job) -> bytes:
     ws.title = "Exam"
     ws.append(FULL_EXPORT_HEADERS)
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    for slot in job.accepted_questions_ordered():
+    interim_numbering = workflow_phase(job) == "db_review"
+    for pos, slot in enumerate(job.accepted_questions_ordered(), 1):
         q = slot.question
         analytics = slot.analytics or missing_analytics()
         ws.append([
-            slot.number,
+            pos if interim_numbering else slot.number,
             slot.db_id if slot.db_id is not None else "",
             slot.category,
             q["question"], q["answer1"], q["answer2"], q["answer3"], q["answer4"],

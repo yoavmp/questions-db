@@ -22,15 +22,19 @@ def _run(jobs_app, payload, *, provider_factory):
 
 # --------------------------------------------------------------------------- #
 def test_db_only_job_succeeds_without_llm_readiness(jobs_app, jobs_root):
-    """No llm anywhere -> readiness is never consulted, job completes on DB alone."""
+    """No llm anywhere -> readiness is never consulted, job completes on DB
+    alone -- WP27: immediately inside create_job (no llm plan means nothing
+    to run; the job is already terminal, not queued/interrupted, so a direct
+    run_job call now correctly refuses it)."""
     with jobs_app.app_context():
-        job = service.create_job(
+        done = service.create_job(
             {"categories": {"היסטולוגיה": {"total": 3, "database": 3, "llm": 0}},
              "cost_ceiling_usd": "5.00", "_seed": 1}
         )
-    done = service.run_job(job.job_id)  # no provider needed
     assert done.status == "completed"
     assert done.accumulated_cost_usd == "0"
+    with pytest.raises(service.JobConflict):
+        service.run_job(done.job_id)
     view = service.result_view(done)
     assert [q["origin"] for q in view["questions"]] == ["database"] * 3
     assert [q["number"] for q in view["questions"]] == [1, 2, 3]

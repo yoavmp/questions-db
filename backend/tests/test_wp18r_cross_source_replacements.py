@@ -328,6 +328,10 @@ def test_both_endpoints_accept_both_origins_via_route(jobs_client, jobs_app, job
     })
     assert r.status_code == 202
     jid = r.get_json()["job_id"]
+    # WP27: creation only selects DB questions (db_review) -- the planned LLM
+    # pair needs an explicit continue-llm before an origin="llm" question exists.
+    cont = jobs_client.post(f"/api/exam-jobs/{jid}/continue-llm")
+    assert cont.status_code == 202, cont.get_json()
     view = jobs_client.get(f"/api/exam-jobs/{jid}").get_json()
     db_q = next(q for q in view["questions"] if q["origin"] == "database")
     llm_q = next(q for q in view["questions"] if q["origin"] == "llm")

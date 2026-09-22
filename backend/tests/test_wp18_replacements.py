@@ -110,10 +110,10 @@ def test_replace_db_rejects_when_no_alternative(jobs_app, jobs_root, llm_ready):
             if q.id not in keep:
                 db.session.delete(q)
         db.session.commit()
-        job = service.create_job(
+        done = service.create_job(
             {"categories": {"היסטולוגיה": {"total": 2, "database": 2, "llm": 0}}, "cost_ceiling_usd": "5.00"}
         )
-    done = service.run_job(job.job_id)
+    assert done.status == "completed"  # WP27: DB-only jobs finish inside create_job
     db_slot = next(s for s in done.slots if s.kind == "database")
     with jobs_app.app_context():
         with pytest.raises(service.JobConflict):

@@ -320,8 +320,21 @@ export function isTerminalStatus(status) {
   return ['completed', 'partial', 'interrupted', 'cost_ceiling', 'failed'].includes(status)
 }
 
+// WP27: "queued" is now the long-lived db_review resting state (nothing is
+// running), so it must not trigger polling on its own anymore -- only an
+// actively running batch (status === "running") does. "interrupted" is a
+// paused state that only changes on explicit user action (Continue), so it
+// is not polled either.
 export function isPollingStatus(status) {
-  return status === 'queued' || status === 'running'
+  return status === 'running'
+}
+
+// WP27 -- the explicit workflow phase from the backend
+// (job.workflow_phase: "db_review" | "llm_generation" | "complete").
+// Falls back to "complete" for a job object that predates this field
+// (e.g. a stale optimistic placeholder) so callers never see `undefined`.
+export function workflowPhase(job) {
+  return job?.workflow_phase || 'complete'
 }
 
 // LLM slots that can be retried.

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.integration import readiness as R
 from src.jobs import service
 
@@ -50,20 +48,27 @@ def test_missing_pricing_file_blocks(monkeypatch, llm_ready, tmp_path):
     assert any("pricing" in r for r in rep["blocking_reasons"])
 
 
-def test_create_job_blocks_when_llm_requested_and_not_ready(jobs_app, jobs_root, monkeypatch):
+def test_create_job_never_checks_readiness_even_with_llm_requested(jobs_app, jobs_root, monkeypatch):
+    """WP27 §2: initial DB selection must work with no OPENAI_API_KEY at all,
+    even when LLM work is planned -- readiness is checked only later, at
+    Continue / manual replace time, never at creation."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with jobs_app.app_context():
-        with pytest.raises(service.JobError) as exc:
-            service.create_job(
-                {"categories": {"מבוא": {"total": 1, "database": 0, "llm": 1}}, "cost_ceiling_usd": "5.00"}
-            )
-    assert "not ready" in str(exc.value)
-    # but a DB-only job is accepted with the same missing key
-    with jobs_app.app_context():
         job = service.create_job(
+            {"categories": {"מבוא": {"total": 1, "database": 0, "llm": 1}}, "cost_ceiling_usd": "5.00"}
+        )
+    assert job.status == "queued"  # db_review: nothing has run
+    assert service.workflow_phase(job) == "db_review"
+    assert job.accumulated_cost_usd == "0"
+
+    # a DB-only job (no LLM planned) is also accepted with the same missing
+    # key, and is persisted completed immediately (WP27 §2 edge case)
+    with jobs_app.app_context():
+        job2 = service.create_job(
             {"categories": {"מבוא": {"total": 1, "database": 1, "llm": 0}}, "cost_ceiling_usd": "5.00"}
         )
-    assert job.status == "queued"
+    assert job2.status == "completed"
+    assert service.workflow_phase(job2) == "complete"
 
 
 def test_submodule_pin_check_matches_recorded_pin(llm_ready):

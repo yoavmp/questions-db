@@ -27,6 +27,7 @@ import {
   syncJobIdToUrl,
   totalLlmRequested,
   validateRow,
+  workflowPhase,
 } from './examGen.js'
 
 describe('parseCount', () => {
@@ -265,12 +266,25 @@ describe('orderQuestions / stripJobMetadata', () => {
 
 describe('status helpers', () => {
   it('classifies polling vs terminal', () => {
-    expect(isPollingStatus('queued')).toBe(true)
+    // WP27: "queued" is now the long-lived db_review resting state (nothing
+    // running) -- only an actively running batch is polled.
     expect(isPollingStatus('running')).toBe(true)
-    for (const s of ['completed', 'partial', 'interrupted', 'cost_ceiling', 'failed']) {
+    for (const s of ['queued', 'completed', 'partial', 'interrupted', 'cost_ceiling', 'failed']) {
       expect(isPollingStatus(s)).toBe(false)
+    }
+    for (const s of ['completed', 'partial', 'interrupted', 'cost_ceiling', 'failed']) {
       expect(isTerminalStatus(s)).toBe(true)
     }
+  })
+})
+
+describe('workflowPhase', () => {
+  it('reads job.workflow_phase, defaulting to complete when absent', () => {
+    expect(workflowPhase({ workflow_phase: 'db_review' })).toBe('db_review')
+    expect(workflowPhase({ workflow_phase: 'llm_generation' })).toBe('llm_generation')
+    expect(workflowPhase({ workflow_phase: 'complete' })).toBe('complete')
+    expect(workflowPhase({})).toBe('complete')
+    expect(workflowPhase(null)).toBe('complete')
   })
 })
 

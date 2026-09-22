@@ -4,9 +4,15 @@ Nothing here does IO. :mod:`src.jobs.store` persists these atomically;
 :mod:`src.jobs.service` drives them.
 
 Job states (``JOB_STATES``):
-    queued       - created, not started
-    running      - the single worker is processing it
-    completed    - every requested slot produced an accepted question
+    queued       - created, not started. WP27: for a job with planned LLM
+                   work this is now the long-lived DB-review resting state
+                   (``service.workflow_phase`` reports it as ``"db_review"``)
+                   -- nothing runs automatically until the explicit
+                   ``continue-llm`` operation claims it.
+    running      - the single worker is processing it (initial run OR a
+                   WP27 continuation batch)
+    completed    - every requested slot produced an accepted question (or no
+                   LLM was ever planned -- WP27 finalises those immediately)
     partial      - at least one accepted and at least one failed slot
     interrupted  - process died while running; unfinished slots are retryable
     cost_ceiling - stopped because the cumulative cap would be breached
@@ -14,6 +20,16 @@ Job states (``JOB_STATES``):
 
 Slot states (``SLOT_STATES``):
     queued | running | accepted | failed | interrupted | cost_ceiling
+
+WP27 §1 -- explicit two-phase workflow. Rather than a persisted field that
+would need to be kept in lockstep with ``status`` at every one of the several
+places ``status`` changes (a real desync-bug risk), the exposed
+``workflow_phase`` (``db_review`` / ``llm_generation`` / ``complete``) is a
+pure function of ``status`` (see ``service.workflow_phase``) -- explicit and
+unambiguous to every API consumer, applies identically to a WP27-created job
+and to any job persisted before WP27 existed (no migration, no rewrite of a
+historical ``job.json``), and can never drift from the ``status`` it is
+computed from.
 """
 
 from __future__ import annotations

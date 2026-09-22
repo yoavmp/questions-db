@@ -51,6 +51,7 @@ import {
   syncJobIdToUrl,
   syncViewedJobIdToUrl,
   validateRow,
+  workflowPhase,
 } from '@/lib/examGen.js'
 import * as api from '@/lib/examApi.js'
 
@@ -528,6 +529,7 @@ export default function ExamGenerationSection() {
   const [error, setError] = useState('')
 
   const [starting, setStarting] = useState(false)
+  const [continuing, setContinuing] = useState(false)
   const [mutating, setMutating] = useState(null) // instance_id being replaced
   const [retryingSlotId, setRetryingSlotId] = useState(null)
   const [newCeiling, setNewCeiling] = useState('')
@@ -539,6 +541,7 @@ export default function ExamGenerationSection() {
   const [branching, setBranching] = useState(false)
 
   const startingRef = useRef(false)
+  const continuingRef = useRef(false)
 
   const refreshJobsList = useCallback(async () => {
     try {
@@ -680,20 +683,10 @@ export default function ExamGenerationSection() {
       saveViewedJobId(res.job_id)
       syncViewedJobIdToUrl(res.job_id)
       setViewedJobId(res.job_id)
-      // optimistic placeholder so the poller starts immediately
-      setJob({
-        status: res.status || 'queued',
-        questions: [],
-        categories: {},
-        totals: {},
-        warnings: [],
-        cost_ceiling_usd: payload.cost_ceiling_usd,
-        accumulated_cost_usd: '0',
-        remaining_cost_usd: payload.cost_ceiling_usd,
-        cost_basis: 'none',
-        display_name: res.display_name,
-        slug: res.slug,
-      })
+      // WP27: creation only selects DB questions -- it is synchronous and
+      // fully formed by the time it returns (no background run to wait out
+      // with a placeholder), so just fetch the real result directly.
+      setJob(await api.fetchJob(res.job_id))
       refreshJobsList()
     } catch (e) {
       setError(e.message || 'שגיאה ביצירת המבחן')
@@ -722,6 +715,25 @@ export default function ExamGenerationSection() {
     withMutation(iid, () => api.replaceFromDb(viewedJobId, iid))
   const handleReplaceLlm = (iid) =>
     withMutation(iid, () => api.replaceViaLlm(viewedJobId, iid))
+
+  // WP27 -- the explicit continuation: claim + start the originally-planned
+  // LLM batch. Protected against repeat clicks the same way handleStart is.
+  const handleContinue = async () => {
+    if (isReadOnly || continuingRef.current) return
+    continuingRef.current = true
+    setContinuing(true)
+    setError('')
+    try {
+      await api.continueLlm(viewedJobId)
+      setJob(await api.fetchJob(viewedJobId))
+      refreshJobsList()
+    } catch (e) {
+      setError(e.message || 'תחילת יצירת השאלות בבינה מלאכותית נכשלה')
+    } finally {
+      continuingRef.current = false
+      setContinuing(false)
+    }
+  }
 
   const handleRetry = async (slotId) => {
     if (isReadOnly || mutating || retryingSlotId || raisingCeiling) return
@@ -912,12 +924,14 @@ export default function ExamGenerationSection() {
   // render: progress + results
   // ------------------------------------------------------------------- //
   const status = job?.status || 'queued'
+  const phase = workflowPhase(job)
+  const isDbReview = phase === 'db_review'
   const totals = job?.totals || {}
   const questions = orderQuestions(job?.questions || [])
   const cats = job?.categories || {}
   const tel = job?.attempt_telemetry
   const retryList = isReadOnly ? [] : retryableSlots(job || {})
-  const anyBusy = !!mutating || !!retryingSlotId || raisingCeiling
+  const anyBusy = !!mutating || !!retryingSlotId || raisingCeiling || continuing
   // recomputed on every render straight from the current question list, so a
   // failed replacement (which never replaces `job`) leaves it unchanged and a
   // successful one is reflected immediately (§4)
@@ -951,6 +965,35 @@ export default function ExamGenerationSection() {
         </div>
       )}
 
+      {/* WP27 -- staged DB review: nothing has run automatically yet */}
+      {isDbReview && (
+        <div
+          className="hebrew-text bg-amber-50 border border-amber-200 text-amber-900 p-4 rounded space-y-3"
+          data-testid="db-review-banner"
+        >
+          <p className="font-semibold">ממתין לאישור שאלות המאגר</p>
+          <p className="text-sm">
+            שאלות המאגר נבחרו לעיון. יצירת שאלות חדשות בבינה מלאכותית עדיין לא
+            החלה. ניתן לעיין בשאלות שנבחרו, להחליף כל שאלה מתוך המאגר או ביצירת
+            שאלה אחרת בבינה מלאכותית, ואז להמשיך ליצירת שאר השאלות.
+          </p>
+          <p className="text-sm">
+            שאלות בינה מלאכותית מתוכננות: {job?.pending_llm_total ?? 0} · עלות
+            בינה מלאכותית מצטברת עד כה: {formatUSD(job?.accumulated_cost_usd || 0)}
+          </p>
+          {!isReadOnly && (
+            <Button
+              className="hebrew-text"
+              disabled={continuing || anyBusy}
+              onClick={handleContinue}
+              data-testid="continue-llm-button"
+            >
+              {continuing ? 'מתחיל ביצירת שאלות...' : 'המשך ליצירת שאלות חדשות באמצעות בינה מלאכותית'}
+            </Button>
+          )}
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between flex-wrap gap-2">
@@ -975,6 +1018,11 @@ export default function ExamGenerationSection() {
                 >
                   יצירת גרסה חדשה
                 </Button>
+              )}
+              {!isReadOnly && !job?.branchable && phase !== 'complete' && (
+                <span className="hebrew-text text-xs text-gray-500" data-testid="branch-disabled-note">
+                  יצירת גרסה חדשה תהיה זמינה לאחר סיום יצירת השאלות החדשות
+                </span>
               )}
               <Button variant="outline" className="hebrew-text" onClick={handleNewExam}>
                 צור מבחן חדש
@@ -1094,7 +1142,7 @@ export default function ExamGenerationSection() {
                 />
               </div>
             ))}
-          {retryList.length === 0 && status !== 'completed' && !isReadOnly && (
+          {retryList.length === 0 && phase === 'llm_generation' && status !== 'completed' && !isReadOnly && (
             <p className="hebrew-text text-sm text-gray-500">
               אין כרגע משבצות הניתנות לניסיון חוזר.
             </p>
@@ -1224,10 +1272,12 @@ export default function ExamGenerationSection() {
         </CardHeader>
         <CardContent className="space-y-6">
           {questions.length === 0 ? (
-            <p className="hebrew-text text-gray-500">
-              {isPollingStatus(status)
-                ? 'עדיין אין שאלות שהתקבלו...'
-                : 'לא התקבלו שאלות.'}
+            <p className="hebrew-text text-gray-500" data-testid="empty-questions-message">
+              {isDbReview
+                ? 'לא נבחרו שאלות מהמאגר עבור מבחן זה (A=0). ניתן להמשיך ליצירת שאלות חדשות בבינה מלאכותית.'
+                : isPollingStatus(status)
+                  ? 'עדיין אין שאלות שהתקבלו...'
+                  : 'לא התקבלו שאלות.'}
             </p>
           ) : (
             groups.map((group) => (

@@ -37,10 +37,9 @@ def _db_only(jobs_app, *, categories=None, excluded=None, identity=None, seed=1)
     if identity is not None:
         payload["identity"] = identity
     with jobs_app.app_context():
-        job = service.create_job(payload)
-    # DB-only categories still need a `run_job` pass to reach a terminal
-    # ("completed") status -- `create_job` only selects+persists the DB slots.
-    return service.run_job(job.job_id)
+        # WP27: a DB-only ("llm": 0) job is finalised inside create_job itself
+        # -- no run_job pass needed or possible (already terminal).
+        return service.create_job(payload)
 
 
 # --------------------------------------------------------------------------- #

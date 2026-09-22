@@ -2,8 +2,9 @@
 
 Routes (all under ``/api``)::
 
-    POST   /exam-jobs                                  -> 202 {job_id, url}
+    POST   /exam-jobs                                  -> 202 {job_id, url} (DB selection only -- WP27)
     GET    /exam-jobs/<job_id>                          -> progress / partial / final (+ attempt_telemetry)
+    POST   /exam-jobs/<job_id>/continue-llm             -> WP27: claim + run the planned LLM batch
     POST   /exam-jobs/<job_id>/slots/<slot_id>/retry    -> retry one failed/interrupted slot
     PUT    /exam-jobs/<job_id>/cost-ceiling             -> raise/lower the cap (>= accumulated)
     POST   /exam-jobs/<job_id>/questions/<iid>/replace-db   -> swap in a DB question (any accepted slot)
@@ -16,6 +17,13 @@ As of WP19 ``replace-db`` takes the same process/file run lock as ``replace-llm`
 and ``retry`` (``JobBusy`` -> 409), so a double click or concurrent request
 cannot cause a lost update or a duplicate DB selection. The legacy synchronous
 ``/api/test/*`` endpoints are untouched (WP19 switches the frontend).
+
+WP27: ``POST /exam-jobs`` no longer starts LLM generation automatically -- it
+only selects DB questions and persists the job (``db_review``, or
+``completed`` immediately if no LLM work was ever planned). The new
+``POST /exam-jobs/<job_id>/continue-llm`` is the one explicit operation that
+claims and runs the originally-planned LLM batch; it follows the exact same
+``EXAM_JOB_SYNC`` / background-thread duality as job creation.
 """
 
 from __future__ import annotations
@@ -60,26 +68,70 @@ def create_job():
     except service.JobError as exc:
         return _err(str(exc), 400)
 
-    pf = _provider_factory()
-    if current_app.config.get("EXAM_JOB_SYNC"):
-        try:
-            service.run_job(job.job_id, provider_factory=pf)
-        except service.JobBusy as exc:
-            return _err(str(exc), 409)
-    else:
-        t = threading.Thread(
-            target=_run_bg, args=(job.job_id, pf), name=f"exam-job-{job.job_id[:8]}", daemon=True,
-        )
-        t.start()
-
+    # WP27 §2: DB selection only -- no automatic LLM generation here anymore.
+    # `job.status` is already the job's real resting state (``queued`` ==
+    # ``db_review`` when LLM work is planned, ``completed`` immediately when
+    # it is not -- see ``service.create_job``).
     body = {
         "job_id": job.job_id,
-        "status": "queued",
+        "status": job.status,
+        "workflow_phase": service.workflow_phase(job),
         "url": url_for("exam_jobs.get_job", job_id=job.job_id, _external=False),
         "display_name": job.identity["display_name"] if job.identity else None,
         "slug": job.identity["slug"] if job.identity else None,
     }
     return jsonify(body), 202
+
+
+@exam_jobs_bp.route("/exam-jobs/<job_id>/continue-llm", methods=["POST"])
+def continue_llm(job_id):
+    """WP27 §3: claim and run the originally-planned LLM batch for a job
+    currently awaiting DB-review approval (or resume one left ``interrupted``
+    by a restart mid-batch). Follows the exact same ``EXAM_JOB_SYNC`` /
+    background-thread duality as ``POST /exam-jobs`` -- the response body is
+    always the same small shape; the caller re-fetches ``GET /exam-jobs/<id>``
+    for the full (possibly still-in-progress) result, exactly like job
+    creation already does.
+    """
+    pf = _provider_factory()
+    if current_app.config.get("EXAM_JOB_SYNC"):
+        try:
+            job = service.continue_llm_generation(job_id, provider_factory=pf)
+        except service.JobError as exc:
+            return _err(str(exc), 404 if "not found" in str(exc) else 400)
+        except service.JobBusy as exc:
+            return _err(str(exc), 409)
+        except service.JobConflict as exc:
+            return _err(str(exc), 409)
+        body = {
+            "job_id": job.job_id,
+            "status": job.status,
+            "workflow_phase": service.workflow_phase(job),
+            "url": url_for("exam_jobs.get_job", job_id=job.job_id, _external=False),
+        }
+        return jsonify(body), 202
+
+    t = threading.Thread(
+        target=_continue_bg, args=(job_id, pf), name=f"exam-continue-{job_id[:8]}", daemon=True,
+    )
+    t.start()
+    body = {
+        "job_id": job_id,
+        "status": "running",
+        "workflow_phase": "llm_generation",
+        "url": url_for("exam_jobs.get_job", job_id=job_id, _external=False),
+    }
+    return jsonify(body), 202
+
+
+def _continue_bg(job_id, provider_factory):
+    try:
+        service.continue_llm_generation(job_id, provider_factory=provider_factory)
+    except (service.JobBusy, service.JobError, service.JobConflict):
+        pass  # a benign, expected outcome of a race/readiness gate -- not a bug
+    except Exception:  # noqa: BLE001 - never crash the daemon thread
+        import logging
+        logging.getLogger("exam_jobs").exception("continue-llm background job %s failed", job_id)
 
 
 @exam_jobs_bp.route("/exam-jobs/<job_id>/branch", methods=["POST"])

@@ -19,12 +19,13 @@ NEW_CAT = "התעלה השדרתית ותכולתה"
 
 
 def _db_only_job(jobs_app, *, total=1):
+    # WP27: a DB-only ("llm": 0) job is finalised inside create_job itself --
+    # no run_job call needed or possible (the job is already terminal).
     with jobs_app.app_context():
-        job = service.create_job({
+        return service.create_job({
             "categories": {CAT: {"total": total, "database": total, "llm": 0}},
             "cost_ceiling_usd": "5.00", "_seed": 1,
         })
-    return service.run_job(job.job_id)
 
 
 def _mutate_and_delete(jobs_app, keep_id, mutate_id):

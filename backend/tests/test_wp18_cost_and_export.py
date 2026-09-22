@@ -159,6 +159,15 @@ def test_create_job_via_route_returns_202_and_polls_to_completion(jobs_client, j
     got = jobs_client.get(body["url"])
     assert got.status_code == 200
     view = got.get_json()
+    # WP27: creation only selects DB questions (db_review); the planned LLM
+    # slot needs an explicit continue-llm before the job reaches "completed".
+    assert view["status"] == "queued"
+    assert view["workflow_phase"] == "db_review"
+    assert [q["origin"] for q in view["questions"]] == ["database"]
+
+    cont = jobs_client.post(f"/api/exam-jobs/{jid}/continue-llm")
+    assert cont.status_code == 202, cont.get_json()
+    view = jobs_client.get(body["url"]).get_json()
     assert view["status"] == "completed"
     assert [q["origin"] for q in view["questions"]] == ["database", "llm"]
     assert view["terminal_summary"]["job_id"] == jid
