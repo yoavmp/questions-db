@@ -550,10 +550,32 @@ $ git -C exam_generator status --short
 
 ## 12. Commit and push outcome
 
-Recorded at completion time in this WP's final terminal report (post-commit
-`git rev-parse HEAD` / `git rev-parse origin/main` / final `git status
---short`, per the WP's "Git completion" section) — see that closing message
-for the exact SHA and push result.
+Committed as `a13b60d24eff0fe025ff6793bc445c2b02bb1298`
+(`WP27: add staged DB review before LLM generation`, 20 files changed).
+`git fetch origin` + `git merge-base --is-ancestor origin/main HEAD`
+confirmed a safe fast-forward (branch was exactly 1 commit ahead, no
+divergence) before pushing; `git push origin main` succeeded normally (no
+force, no rewrite). Final state:
+
+```
+$ git rev-parse HEAD
+a13b60d24eff0fe025ff6793bc445c2b02bb1298
+$ git rev-parse origin/main
+a13b60d24eff0fe025ff6793bc445c2b02bb1298
+$ git status --short
+?? WPs/PRE_WP25_LATEST_EXAM_REVIEW.md
+?? WPs/PRE_WP26R_AUDIT.md
+$ git submodule status
+ d20c46bbb332e4d40f735e843d31113176b755e5 exam_generator (heads/main)
+$ git -C exam_generator rev-parse HEAD
+d20c46bbb332e4d40f735e843d31113176b755e5
+$ git -C exam_generator status --short
+(clean)
+```
+
+`HEAD == origin/main`; the only remaining outer untracked files are the two
+pre-existing owner-owned PRE reports, exactly as expected at completion; the
+generator submodule is unchanged and clean.
 
 ## 13. Known limitations / owner decisions that may be worth revisiting
 
