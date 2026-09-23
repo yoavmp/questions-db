@@ -377,22 +377,27 @@ git -C exam_generator rev-parse origin/main -> 5200b531f559b9fcd963cb7a3ca22ebcc
 git -C exam_generator status --short        -> (clean)
 ```
 
-Outer (recorded after the commit/push step immediately following this
-report — see the session's final terminal output for the literal command
-transcript the WP requires):
+Outer:
 
 ```
-git rev-parse HEAD
-git rev-parse origin/main
-git status --short
-git submodule status
+git rev-parse HEAD                          -> 838668ce7f31cf4637200f5339efc04b867975ef
+git rev-parse origin/main                   -> 838668ce7f31cf4637200f5339efc04b867975ef
+git status --short                          -> ?? WPs/PRE_WP25_LATEST_EXAM_REVIEW.md
+                                                 ?? WPs/PRE_WP26R_AUDIT.md
+                                                 ?? WPs/PRE_WP28_EXAM_258FFEF8_AUDIT.md
+git submodule status                        -> 5200b531f559b9fcd963cb7a3ca22ebcc6f4a98d exam_generator (heads/main)
 ```
 
-The outer gitlink for `exam_generator` was advanced to
+Commit: `WP28: add review warnings and persistent LLM editing` (`838668c`),
+pushed as a plain fast-forward (`012d2a1..838668c main -> main`; fetched and
+verified `git merge-base --is-ancestor origin/main HEAD` beforehand — no
+force, no rewrite). The outer gitlink for `exam_generator` was advanced to
 `5200b531f559b9fcd963cb7a3ca22ebcc6f4a98d` — the generator commit that was
 fetched-and-verified-then-pushed *before* this outer commit was created, per
 the WP's ordering requirement (never advancing the outer gitlink to an
-unpushed generator commit).
+unpushed generator commit). Both working trees are otherwise clean; the only
+remaining untracked outer files are the three pre-existing owner-owned
+`PRE_*.md` reports, exactly as the WP permits.
 
 ## 13. Remaining limitations / owner decisions
 
