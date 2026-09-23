@@ -146,6 +146,30 @@ class Slot:
     primary_category: Optional[str] = None
     categories: Optional[list] = None
 
+    #: WP28 §B1 -- ``"clean"`` or ``"warning"`` for the *current* LLM-origin
+    #: question (meaningless / always ``"clean"`` for a database slot).
+    #: Warning-accepted counts as accepted; this is metadata only, never part
+    #: of the seven-field public ``question``.
+    review_quality: str = "clean"
+    #: WP28 §B1 -- structured warnings on the current LLM question (0 or 1,
+    #: mirroring the generator's own cap), each:
+    #: ``{"warning_id", "code", "field" (public "answerN"), "message_he",
+    #: "resolved", "resolved_by", "resolved_at"}``. Cleared/reset whenever a
+    #: fresh generation (initial/retry/replace_llm) accepts a new question
+    #: into this slot; a manual edit may mark one ``resolved`` in place (see
+    #: ``service.edit_llm_question``) but never removes or adds one.
+    review_warnings: list = field(default_factory=list)
+    #: WP28 §B3 -- true once the owner has manually edited the current
+    #: LLM-origin question at least once since it was last (re)generated.
+    #: Always false for a database slot.
+    manually_edited: bool = False
+    #: WP28 §B3 -- immutable, append-only manual-edit history for the current
+    #: LLM-origin question: ``{"edited_at", "before", "after",
+    #: "affected_warning_ids"}`` per edit, oldest first. Reset (emptied) only
+    #: when a fresh generation replaces the question this history describes;
+    #: never mutated or reordered otherwise.
+    edit_history: list = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return {
             "slot_id": self.slot_id,
@@ -166,6 +190,10 @@ class Slot:
             "analytics": self.analytics,
             "primary_category": self.primary_category,
             "categories": self.categories,
+            "review_quality": self.review_quality,
+            "review_warnings": self.review_warnings,
+            "manually_edited": self.manually_edited,
+            "edit_history": self.edit_history,
         }
 
     @classmethod
@@ -191,6 +219,13 @@ class Slot:
             # only (see ``service.result_view``), never backfilled here.
             primary_category=d.get("primary_category"),
             categories=d.get("categories"),
+            # WP28: absent on every pre-WP28 slot -- safe defaults
+            # ("clean"/[]/False/[]), never backfilled onto the persisted file
+            # merely by loading it.
+            review_quality=d.get("review_quality", "clean"),
+            review_warnings=list(d.get("review_warnings") or []),
+            manually_edited=d.get("manually_edited", False),
+            edit_history=list(d.get("edit_history") or []),
         )
 
 
@@ -257,6 +292,18 @@ class Job:
     #: non-monotonic ``number`` values are legitimate and are never sorted or
     #: de-duplicated before a generator call.
     category_history: dict = field(default_factory=dict)
+
+    #: WP28 §B2 -- bounded, structured hard-rejection failure memory, per
+    #: category: ``{category: [ {category, question_summary, bad_field,
+    #: bad_value, failure_code, instruction, recorded_at}, ... ]}``, oldest
+    #: first (chronological insertion order). Never contains a warning
+    #: acceptance, raw prompt, hidden reasoning, or full provider response --
+    #: only the generator's own already-bounded, already-structured
+    #: ``HardRejectionFeedback`` records (see ``exam_generator.production``),
+    #: each with a ``recorded_at`` timestamp added here. Never folded into
+    #: ``category_history``/``previous_public_questions``. Empty dict on
+    #: every pre-WP28 job.
+    hard_rejection_feedback: dict = field(default_factory=dict)
 
     #: cumulative cost ledger: one entry per generator call outcome
     cost_ledger: list = field(default_factory=list)
@@ -345,6 +392,7 @@ class Job:
             "categories": [c.to_dict() for c in self.categories],
             "slots": [s.to_dict() for s in self.slots],
             "category_history": self.category_history,
+            "hard_rejection_feedback": self.hard_rejection_feedback,
             "cost_ledger": self.cost_ledger,
             "pricing_verification": self.pricing_verification,
             "warnings": self.warnings,
@@ -386,6 +434,7 @@ class Job:
             categories=[CategoryPlan.from_dict(c) for c in d.get("categories", [])],
             slots=slots,
             category_history=d.get("category_history", {}),
+            hard_rejection_feedback=d.get("hard_rejection_feedback") or {},
             cost_ledger=d.get("cost_ledger", []),
             pricing_verification=d.get("pricing_verification", {}),
             warnings=d.get("warnings", []),

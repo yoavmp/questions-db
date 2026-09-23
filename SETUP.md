@@ -275,6 +275,48 @@ exactly the remaining planned questions; nothing already generated is ever
 redone. A single failed/paused question can also be retried on its own from
 the per-topic progress list, independently of resuming the whole batch.
 
+## Warning Acceptance, Manual Editing, and Failed Replacement (WP28)
+
+**Warning acceptance.** A generated question with exactly one weak-but-real
+distractor (a real, source-grounded, category-appropriate term that is
+definitely wrong for the question but only structurally/type-mismatched or
+low-plausibility — e.g. offering a deep cerebellar nucleus as one of three
+cortex *layers*) is now **accepted immediately**, not rejected/regenerated.
+It shows a **"דורש בדיקה"** (requires review) badge, highlights the exact
+affected answer, and explains the mismatch in Hebrew. It is never generated
+again purely because of the warning, and the topic itself is never treated
+as forbidden — two or more weak distractors, or any more serious defect,
+still hard-rejects and regenerates as before.
+
+**Hard-rejection memory.** When a candidate *is* hard-rejected, this exam job
+now remembers a small, bounded record of the specific defect (never the
+topic) per category, and a later same-category operation (a retry, or
+"צור שאלה אחרת") is told not to repeat it. Nothing about this ever appears
+in a public export — it only shapes what the generator tries next.
+
+**Manual editing.** Every current AI-generated question now has an
+**"ערוך שאלה"** button (database-origin questions never get one). It opens
+an inline form for the stem, all four answers, and the correct-answer
+selector; saving requires no `OPENAI_API_KEY` and makes no AI call — the
+owner's edit is authoritative. Editing the exact answer a warning named
+resolves that warning (shown as a quieter **"תוקן ידנית"** state); editing
+anything else leaves an unrelated warning open. Every edit is kept in an
+immutable history and survives reload/restart; DOCX and Excel exports always
+use the current edited text, never the original AI draft.
+
+**Export confirmation.** Exporting (DOCX or either Excel format) while any
+question still shows an unresolved "דורש בדיקה" warning asks for one
+explicit confirmation first, naming how many; cancelling downloads nothing,
+confirming exports normally. A fully resolved/clean exam exports with no
+extra prompt, same as before WP28.
+
+**Failed replacement.** If "צור שאלה אחרת" exhausts its attempts without
+producing an accepted question, the original question is kept exactly as it
+was — the exam now says so explicitly
+(**"לא נוצרה שאלה חלופית. השאלה המקורית נשמרה."**) with the attempt
+count/cost when available, instead of leaving it ambiguous whether anything
+changed.
+
 ## Question Categories - קטגוריות שאלות
 
 A question's **full category list** (`categories`) is the only thing that

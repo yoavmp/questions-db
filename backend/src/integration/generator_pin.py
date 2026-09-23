@@ -8,7 +8,7 @@ re-pinned (see WPs/ARCHITECT_HANDOFF.md "Submodule re-pin procedure").
 
 from __future__ import annotations
 
-EXPECTED_GENERATOR_PIN = "d20c46bbb332e4d40f735e843d31113176b755e5"
-EXPECTED_GENERATOR_PIN_LABEL = "WP25G: reject inverse semantic duplicates"
+EXPECTED_GENERATOR_PIN = "5200b531f559b9fcd963cb7a3ca22ebcc6f4a98d"
+EXPECTED_GENERATOR_PIN_LABEL = "WP28G: add warning acceptance and repair hardening"
 
 __all__ = ["EXPECTED_GENERATOR_PIN", "EXPECTED_GENERATOR_PIN_LABEL"]

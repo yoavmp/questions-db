@@ -48,6 +48,13 @@ _RUN_LOCK = threading.Lock()
 
 ProviderFactory = Callable[[], Any]  # returns a provider or None
 
+#: WP28 §B2 -- small, deterministic bound on how many prior same-category
+#: hard-rejection records are ever rendered into one generator call's prompt.
+#: Recommended range from the WP is 5-10; the store itself keeps every
+#: deduplicated record for audit/history, this only bounds the prompt
+#: contribution actually sent.
+MAX_HARD_REJECTION_FEEDBACK_PER_CALL = 8
+
 
 class JobError(ValueError):
     """Bad job request (400)."""
@@ -471,6 +478,27 @@ def _previous_for_slot(job: Job, slot: Slot, *, exclude_instance: Optional[str] 
     return prev
 
 
+def _record_hard_rejection_feedback(job: Job, category: str, new_records: list) -> None:
+    """WP28 §B2 -- append the generator's newly-produced hard-rejection
+    records for ``category`` to the job's bounded, per-category store,
+    deduplicated (never an exact repeat of an already-stored record) and in
+    chronological insertion order. Never stores a warning acceptance (the
+    generator itself never returns one of these for a success), never folds
+    into ``category_history``."""
+    if not new_records:
+        return
+    bucket = job.hard_rejection_feedback.setdefault(category, [])
+    existing_keys = {
+        (r.get("bad_field"), r.get("bad_value"), r.get("failure_code")) for r in bucket
+    }
+    for record in new_records:
+        key = (record.get("bad_field"), record.get("bad_value"), record.get("failure_code"))
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        bucket.append({**record, "recorded_at": now_iso()})
+
+
 # --------------------------------------------------------------------------- #
 # one LLM generation call
 # --------------------------------------------------------------------------- #
@@ -520,6 +548,19 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
         "created_at": now_iso(),
     })
 
+    # WP28 §B2: the most recent bounded slice of this category's own stored
+    # hard-rejection records, rendered into the generator's prompt so a new
+    # attempt does not repeat an already-demonstrated specific defect. The
+    # topic/category itself is never excluded by this -- see
+    # ``exam_generator.generation_models.HardRejectionFeedback``. Strip the
+    # ``recorded_at`` bookkeeping this store adds on top (see
+    # ``_record_hard_rejection_feedback``) -- the generator's own model is
+    # strict (``extra="forbid"``) and only knows its own fields.
+    feedback_in = [
+        {k: v for k, v in r.items() if k != "recorded_at"}
+        for r in job.hard_rejection_feedback.get(slot.category, [])[-MAX_HARD_REJECTION_FEEDBACK_PER_CALL:]
+    ]
+
     result = generate_category_question(
         AdapterRequest(
             canonical_category=slot.category,
@@ -529,11 +570,19 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
             cost_ceiling_usd=remaining,
             actual_spend_usd=Decimal("0"),          # remaining already nets it out
             audit_dir=audit_dir,
+            hard_rejection_feedback=feedback_in,
         ),
         provider=provider,
     )
     _record_cost(job, kind=kind, slot=slot, result=result, audit_ref=audit_ref,
                  invocation_uuid=invocation_uuid)
+    # WP28 §B2: only candidate-level hard rejections ever produce a record
+    # (never a warning/clean acceptance, never a provider/systemic/cost-
+    # ceiling outcome with no usable candidate) -- enforced by the generator
+    # itself; this just persists whatever it safely returned.
+    _record_hard_rejection_feedback(
+        job, slot.category, getattr(result, "hard_rejection_feedback", []) or []
+    )
     slot.audit_ref = audit_ref
     slot.attempts = max(slot.attempts, getattr(result, "attempts", slot.attempts))
 
@@ -544,6 +593,25 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
         slot.was_repaired = bool(getattr(result, "was_repaired", False))
         slot.status = "accepted"
         slot.safe_error = None
+        # WP28 §B1/§B3: a fresh acceptance is new LLM-origin content -- its
+        # warning/edit state starts clean, never inherited from whatever this
+        # slot held before (a prior generation's warnings/edits describe text
+        # that no longer exists in this slot).
+        slot.review_quality = str(getattr(result, "review_quality", "clean"))
+        slot.review_warnings = [
+            {
+                "warning_id": new_id(),
+                "code": w.get("code"),
+                "field": w.get("field"),
+                "message_he": w.get("message_he"),
+                "resolved": False,
+                "resolved_by": None,
+                "resolved_at": None,
+            }
+            for w in getattr(result, "review_warnings", []) or []
+        ]
+        slot.manually_edited = False
+        slot.edit_history = []
     elif result.status == "cost_ceiling":
         slot.status = "cost_ceiling"
         slot.safe_error = result.failure_reason
@@ -1153,11 +1221,20 @@ def replace_via_llm(job_id: str, instance_id: str, *,
                 job.category_history.setdefault(slot.category, []).append(old_question)
             _recompute_db_selected_ids(job, slot.category)
         else:
-            # failure: restore the slot exactly (question, origin, metadata),
-            # keeping only a safe_error describing why nothing changed.
-            reason = (
-                getattr(result, "failure_reason", None) if result is not None else None
-            ) or "LLM replacement did not produce an accepted question; original kept"
+            # WP28 §B6: restore the slot exactly (question, origin, metadata)
+            # and make the retention explicit and unambiguous in Hebrew --
+            # the audit found this wasn't sufficiently clear to the owner
+            # before. Never implies a new question was generated; includes
+            # the attempt count/cost when the safe response/ledger has them.
+            attempts = getattr(result, "attempts", None) if result is not None else None
+            cost = getattr(result, "cost_usd", None) if result is not None else None
+            detail_bits = []
+            if attempts:
+                detail_bits.append(f"ניסיונות: {attempts}")
+            if cost and cost != "0":
+                detail_bits.append(f"עלות: ${cost}")
+            detail = f" ({', '.join(detail_bits)})" if detail_bits else ""
+            reason = f"לא נוצרה שאלה חלופית. השאלה המקורית נשמרה.{detail}"
             _restore_slot(slot, snap)
             slot.safe_error = reason
 
@@ -1170,6 +1247,120 @@ def replace_via_llm(job_id: str, instance_id: str, *,
             _finalise(job, stopped_by_ceiling=(result is not None and result.status == "cost_ceiling"))
         store.save(job)
         _print_terminal_summary(job, operation="replace_llm")
+        return job
+    finally:
+        if got_file_lock:
+            store.release_lock(job_id)
+        _RUN_LOCK.release()
+
+
+# --------------------------------------------------------------------------- #
+# WP28 §B3 -- persistent manual editing of a current LLM-origin question
+# --------------------------------------------------------------------------- #
+_EDITABLE_PUBLIC_FIELDS = ("question", "answer1", "answer2", "answer3", "answer4", "correct_answer")
+_EDITABLE_TEXT_FIELDS = ("question", "answer1", "answer2", "answer3", "answer4")
+
+
+def _validate_manual_edit_payload(payload: Any) -> dict:
+    """Deterministic structural validation only -- no LLM call, no semantic
+    or grounding check; the owner is authoritative for the content. Returns
+    the normalized (trimmed) six-field edit dict or raises ``JobError``."""
+    if not isinstance(payload, dict):
+        raise JobError("request body must be an object")
+    extra = set(payload) - set(_EDITABLE_PUBLIC_FIELDS)
+    if extra:
+        raise JobError(f"payload contains unexpected field(s): {sorted(extra)}")
+    missing = set(_EDITABLE_PUBLIC_FIELDS) - set(payload)
+    if missing:
+        raise JobError(f"payload is missing required field(s): {sorted(missing)}")
+
+    normalized: dict = {}
+    for f in _EDITABLE_TEXT_FIELDS:
+        v = payload[f]
+        if not isinstance(v, str) or not v.strip():
+            raise JobError(f"{f} must be a non-empty string")
+        normalized[f] = v.strip()
+
+    answers = [normalized["answer1"], normalized["answer2"], normalized["answer3"], normalized["answer4"]]
+    if len(set(answers)) != len(answers):
+        raise JobError("the four answers must be distinct")
+
+    correct = payload["correct_answer"]
+    if isinstance(correct, bool) or not isinstance(correct, int) or correct not in (1, 2, 3, 4):
+        raise JobError("correct_answer must be an integer between 1 and 4")
+    normalized["correct_answer"] = correct
+    return normalized
+
+
+def edit_llm_question(job_id: str, instance_id: str, payload: Any) -> Job:
+    """Persistently edit the CURRENT LLM-origin question in one slot.
+
+    Owner-authoritative: no LLM call, no ``OPENAI_API_KEY`` needed. Only
+    permitted when the slot currently holds an accepted, LLM-origin question
+    and the job is not actively generating; a database-origin slot, a
+    missing slot, or a job mid-generation are all rejected safely, matching
+    the same permission boundary ``replace_via_llm``/``replace_from_db``
+    already use for "any accepted slot" (there is no separate
+    frontend/backend notion of a job being "historical" beyond that -- a
+    branched job is simply a new, independent, fully editable job; see
+    ``branch_job``).
+
+    On success: appends an immutable edit-history entry (timestamp,
+    before/after seven-field values, affected warning ids), updates the
+    current seven-field question in place (preserving ``number``/category/
+    ``instance_id``/source origin/audit references/cost/analytics
+    unchanged), sets ``manually_edited = True``, and resolves exactly the
+    unresolved warning(s) whose own declared field was among the changed
+    ones (``resolved_by = "manual_edit"``) -- never an unrelated warning.
+    Saved atomically like every other job mutation.
+    """
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise JobBusy("another exam-generation operation is already running")
+    got_file_lock = False
+    try:
+        job = store.load(job_id)
+        if job is None:
+            raise JobError(f"job {job_id} not found")
+        slot = job.slot_by_instance(instance_id)
+        if slot is None:
+            raise JobError(f"question {instance_id} not found in job {job_id}")
+        if job.status == "running":
+            raise JobConflict("the job is currently generating; try again once it finishes")
+        if slot.status != "accepted" or not slot.question:
+            raise JobConflict("only an accepted question can be edited")
+        if slot.kind != "llm":
+            raise JobConflict("only an LLM-origin question can be edited")
+
+        normalized = _validate_manual_edit_payload(payload)
+
+        got_file_lock = store.try_acquire_lock(job_id)
+        if not got_file_lock:
+            raise JobBusy("job is locked by another process")
+
+        before = {f: slot.question[f] for f in SEVEN}
+        after = dict(before)
+        after.update(normalized)
+
+        changed_fields = {f for f in _EDITABLE_PUBLIC_FIELDS if before[f] != after[f]}
+        affected_warning_ids: list[str] = []
+        for w in slot.review_warnings:
+            if w.get("resolved"):
+                continue
+            if w.get("field") in changed_fields:
+                w["resolved"] = True
+                w["resolved_by"] = "manual_edit"
+                w["resolved_at"] = now_iso()
+                affected_warning_ids.append(w.get("warning_id"))
+
+        slot.edit_history.append({
+            "edited_at": now_iso(),
+            "before": before,
+            "after": after,
+            "affected_warning_ids": affected_warning_ids,
+        })
+        slot.question = after
+        slot.manually_edited = True
+        store.save(job)
         return job
     finally:
         if got_file_lock:
@@ -1337,6 +1528,9 @@ def result_view(job: Job) -> dict:
                 attempts=slot.attempts, retries_by_slot=slot.retries,
                 cost_usd=_slot_cost(job, slot), was_repaired=slot.was_repaired,
                 audit_ref=slot.audit_ref, outcome="accepted",
+                review_quality=slot.review_quality,
+                review_warnings=[dict(w) for w in slot.review_warnings],
+                manually_edited=slot.manually_edited,
             )
             dto = ExamQuestionDTO.from_generated(
                 {f: slot.question[f] for f in SEVEN}, number=slot.question["number"],
@@ -1478,6 +1672,14 @@ def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
                 # from the live DB.
                 primary_category=s.primary_category,
                 categories=list(s.categories) if s.categories is not None else None,
+                # WP28 §B3: a branch copies the parent's current edited
+                # question, warning/resolution metadata, and edit history
+                # verbatim -- the child starts as an exact snapshot, not a
+                # fresh generation.
+                review_quality=s.review_quality,
+                review_warnings=[dict(w) for w in s.review_warnings],
+                manually_edited=s.manually_edited,
+                edit_history=[dict(h) for h in s.edit_history],
             ))
         new_categories = [
             CategoryPlan(
@@ -1503,6 +1705,14 @@ def branch_job(job_id: str, identity_payload: Optional[dict]) -> Job:
             categories=new_categories,
             slots=new_slots,
             category_history={k: [dict(h) for h in v] for k, v in parent.category_history.items()},
+            # WP28 §B2/§B3: hard-rejection failure memory is category-scoped
+            # history, not job-mutation-scoped -- copied the same way
+            # ``category_history`` already is, so a branch's own later
+            # replace/retry calls keep learning from what the parent already
+            # demonstrated for that category.
+            hard_rejection_feedback={
+                k: [dict(r) for r in v] for k, v in parent.hard_rejection_feedback.items()
+            },
             cost_ledger=[],
             pricing_verification={},
             warnings=[],

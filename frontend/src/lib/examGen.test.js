@@ -26,6 +26,8 @@ import {
   SEVEN_PUBLIC_FIELDS,
   syncJobIdToUrl,
   totalLlmRequested,
+  unresolvedWarningCount,
+  validateQuestionEdit,
   validateRow,
   workflowPhase,
 } from './examGen.js'
@@ -435,5 +437,53 @@ describe('slotAttemptCounts / slotAttemptCountsByInstance (ledger-derived, §6, 
     expect(slotAttemptCounts(telemetry, 'missing')).toEqual(zero)
     expect(slotAttemptCountsByInstance(telemetry, 'missing')).toEqual(zero)
     expect(slotAttemptCounts(null, 's-1')).toEqual(zero)
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// WP28 §B4/§B5 -- warning-count / manual-edit-validation helpers
+// --------------------------------------------------------------------------- //
+describe('unresolvedWarningCount', () => {
+  const q = (warnings) => ({ generation_meta: { review_warnings: warnings } })
+
+  it('is 0 when there are no questions or none carry warnings', () => {
+    expect(unresolvedWarningCount([])).toBe(0)
+    expect(unresolvedWarningCount(null)).toBe(0)
+    expect(unresolvedWarningCount([{ generation_meta: {} }, { origin: 'database' }])).toBe(0)
+  })
+
+  it('counts only unresolved warnings, across every question', () => {
+    const questions = [
+      q([{ resolved: false }, { resolved: true }]),
+      q([{ resolved: false }]),
+      { generation_meta: undefined },
+    ]
+    expect(unresolvedWarningCount(questions)).toBe(2)
+  })
+
+  it('is 0 once every warning is resolved', () => {
+    expect(unresolvedWarningCount([q([{ resolved: true }, { resolved: true }])])).toBe(0)
+  })
+})
+
+describe('validateQuestionEdit', () => {
+  const valid = { question: 'q?', answer1: 'a', answer2: 'b', answer3: 'c', answer4: 'd', correct_answer: 1 }
+
+  it('accepts a well-formed draft', () => {
+    expect(validateQuestionEdit(valid)).toBe('')
+  })
+
+  it('rejects a blank field', () => {
+    expect(validateQuestionEdit({ ...valid, question: '   ' })).not.toBe('')
+  })
+
+  it('rejects duplicate answers', () => {
+    expect(validateQuestionEdit({ ...valid, answer2: 'a' })).not.toBe('')
+  })
+
+  it('rejects an out-of-range or non-integer correct_answer', () => {
+    expect(validateQuestionEdit({ ...valid, correct_answer: 0 })).not.toBe('')
+    expect(validateQuestionEdit({ ...valid, correct_answer: 5 })).not.toBe('')
+    expect(validateQuestionEdit({ ...valid, correct_answer: 1.5 })).not.toBe('')
   })
 })

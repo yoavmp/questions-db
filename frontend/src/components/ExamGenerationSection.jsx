@@ -50,6 +50,8 @@ import {
   structuredDisplayName,
   syncJobIdToUrl,
   syncViewedJobIdToUrl,
+  unresolvedWarningCount,
+  validateQuestionEdit,
   validateRow,
   workflowPhase,
 } from '@/lib/examGen.js'
@@ -74,6 +76,21 @@ const SLOT_STATUS_LABEL = {
   failed: 'נכשל',
   interrupted: 'הופסק',
   cost_ceiling: 'תקרת עלות',
+}
+
+// WP28 §B7 -- a numerical ratio/count pair rendered inside Hebrew RTL text
+// must never visually reverse operand order. `<bdi dir="ltr">` isolates just
+// the digits/operator from the surrounding RTL context (never the whole
+// card/page -- see the WP) while the ambient text stays right-to-left. One
+// reusable component for every "X / Y" pair in this screen.
+function Ratio({ left, right, sep = ' / ' }) {
+  return (
+    <bdi dir="ltr">
+      {left}
+      {sep}
+      {right}
+    </bdi>
+  )
 }
 
 function OriginBadge({ origin }) {
@@ -417,7 +434,7 @@ function SlotChips({ slots, telemetry, onRetry, retryingSlotId, mutating, readOn
 // --------------------------------------------------------------------------- //
 // result question
 // --------------------------------------------------------------------------- //
-function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onReplaceLlm, readOnly }) {
+function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onReplaceLlm, onEdit, readOnly }) {
   const [showAnswer, setShowAnswer] = useState(false)
   const answers = [q.answer1, q.answer2, q.answer3, q.answer4]
   // ledger-derived, not q.generation_meta's mutable slot counters (§6) -- a
@@ -428,27 +445,70 @@ function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onRep
     telemetry,
     q.instance_id,
   )
+  // WP28 §B4 -- warning acceptance / manual-edit review state (LLM-origin
+  // only; a database question never carries review_warnings).
+  const allWarnings = q.generation_meta?.review_warnings || []
+  const unresolved = allWarnings.filter((w) => !w.resolved)
+  const resolved = allWarnings.filter((w) => w.resolved)
+  const unresolvedFields = new Set(unresolved.map((w) => w.field))
   return (
     <Card className="p-4 hebrew-text">
       <div className="flex items-start justify-between gap-2 mb-2">
         <p className="font-semibold flex-1">
           {q.number}. {q.question}
         </p>
-        <OriginBadge origin={q.origin} />
+        <div className="flex flex-wrap items-center gap-1 justify-end">
+          <OriginBadge origin={q.origin} />
+          {unresolved.length > 0 && (
+            <Badge
+              variant="outline"
+              className="hebrew-text border-amber-400 text-amber-700 bg-amber-50"
+              data-testid="requires-review-badge"
+            >
+              דורש בדיקה
+            </Badge>
+          )}
+          {unresolved.length === 0 && resolved.length > 0 && (
+            <Badge
+              variant="secondary"
+              className="hebrew-text text-gray-600"
+              data-testid="manually-fixed-badge"
+            >
+              תוקן ידנית
+            </Badge>
+          )}
+        </div>
       </div>
+      {unresolved.length > 0 && (
+        <div
+          className="mb-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 space-y-1"
+          data-testid="warning-explanation"
+        >
+          {unresolved.map((w) => (
+            <p key={w.warning_id}>⚠ {w.message_he}</p>
+          ))}
+        </div>
+      )}
       <div className="space-y-1 text-sm">
-        {answers.map((a, i) => (
-          <div
-            key={i}
-            className={`p-2 rounded border ${
-              showAnswer && i + 1 === q.correct_answer
-                ? 'bg-green-50 border-green-200 text-green-800'
-                : 'bg-gray-50 border-gray-200'
-            }`}
-          >
-            <span className="font-medium">{i + 1}.</span> {a}
-          </div>
-        ))}
+        {answers.map((a, i) => {
+          const field = `answer${i + 1}`
+          const flagged = unresolvedFields.has(field)
+          return (
+            <div
+              key={i}
+              className={`p-2 rounded border ${
+                flagged
+                  ? 'bg-amber-50 border-amber-300 ring-1 ring-amber-300'
+                  : showAnswer && i + 1 === q.correct_answer
+                    ? 'bg-green-50 border-green-200 text-green-800'
+                    : 'bg-gray-50 border-gray-200'
+              }`}
+            >
+              <span className="font-medium">{i + 1}.</span> {a}
+              {flagged && <span className="text-amber-700 text-xs mr-2">(דורש בדיקה)</span>}
+            </div>
+          )
+        })}
       </div>
       {/* historical accuracy/distinction -- 'N/A' when there is no data at
           all (LLM origin, or a never-used DB question); every recorded value
@@ -486,6 +546,18 @@ function ResultQuestion({ q, telemetry, disabled, isMutating, onReplaceDb, onRep
             >
               {isMutating ? 'יוצר...' : 'צור שאלה אחרת'}
             </Button>
+            {q.origin === 'llm' && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="hebrew-text"
+                disabled={disabled}
+                onClick={() => onEdit(q)}
+                data-testid="edit-question-button"
+              >
+                ערוך שאלה
+              </Button>
+            )}
           </>
         )}
         {attempts > 0 && (
@@ -539,6 +611,15 @@ export default function ExamGenerationSection() {
   const [branchOpen, setBranchOpen] = useState(false)
   const [branchIdentity, setBranchIdentity] = useState(emptyIdentity())
   const [branching, setBranching] = useState(false)
+
+  // WP28 §B3/§B4 -- manual editing of the current LLM-origin question.
+  const [editingQuestion, setEditingQuestion] = useState(null) // the q being edited, or null
+  const [editForm, setEditForm] = useState(null)
+  const [editError, setEditError] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // WP28 §B5 -- export confirmation when unresolved warnings remain.
+  const [exportConfirm, setExportConfirm] = useState(null) // { count, run } | null
 
   const startingRef = useRef(false)
   const continuingRef = useRef(false)
@@ -718,6 +799,62 @@ export default function ExamGenerationSection() {
     withMutation(iid, () => api.replaceFromDb(viewedJobId, iid))
   const handleReplaceLlm = (iid) =>
     withMutation(iid, () => api.replaceViaLlm(viewedJobId, iid))
+
+  // WP28 §B3/§B4 -- open the edit panel with the question's current values.
+  const handleEditStart = (q) => {
+    setEditError('')
+    setEditForm({
+      question: q.question, answer1: q.answer1, answer2: q.answer2,
+      answer3: q.answer3, answer4: q.answer4, correct_answer: q.correct_answer,
+    })
+    setEditingQuestion(q)
+  }
+  const handleEditCancel = () => {
+    setEditingQuestion(null)
+    setEditForm(null)
+    setEditError('')
+  }
+  const handleEditField = (field, value) => setEditForm((f) => ({ ...f, [field]: value }))
+  const handleEditSave = async () => {
+    if (!editingQuestion || saving) return
+    const problem = validateQuestionEdit(editForm)
+    if (problem) {
+      setEditError(problem)
+      return
+    }
+    setSaving(true)
+    setEditError('')
+    try {
+      const v = await api.updateQuestionManually(viewedJobId, editingQuestion.instance_id, {
+        ...editForm, correct_answer: Number(editForm.correct_answer),
+      })
+      setJob(v)
+      setEditingQuestion(null)
+      setEditForm(null)
+    } catch (e) {
+      setEditError(e.message || 'שמירת העריכה נכשלה')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // WP28 §B5 -- gate a question-content export behind an explicit Hebrew
+  // confirmation whenever unresolved warnings remain among current accepted
+  // questions. Cancel performs no export request/download; confirming
+  // continues normally. A resolved warning never counts.
+  const requestExport = (run) => {
+    const count = unresolvedWarningCount(job?.questions)
+    if (count > 0) {
+      setExportConfirm({ count, run })
+      return
+    }
+    run()
+  }
+  const confirmExport = () => {
+    const pending = exportConfirm
+    setExportConfirm(null)
+    pending?.run()
+  }
 
   // WP27 -- the explicit continuation: claim + start the originally-planned
   // LLM batch. Protected against repeat clicks the same way handleStart is.
@@ -1108,20 +1245,22 @@ export default function ExamGenerationSection() {
             <div className="p-3 bg-gray-50 rounded">
               <div className="text-gray-500">שאלות שהתקבלו</div>
               <div className="font-semibold" data-testid="accepted-count">
-                {questions.length} / {totals.questions_requested ?? '—'}
+                <Ratio left={questions.length} right={totals.questions_requested ?? '—'} />
               </div>
             </div>
             <div className="p-3 bg-gray-50 rounded">
               <div className="text-gray-500">שאלות בינה שהתקבלו</div>
               <div className="font-semibold">
-                {totals.llm_accepted ?? 0} / {totals.llm_requested ?? 0}
+                <Ratio left={totals.llm_accepted ?? 0} right={totals.llm_requested ?? 0} />
               </div>
             </div>
             <div className="p-3 bg-gray-50 rounded">
               <div className="text-gray-500">עלות מצטברת</div>
               <div className="font-semibold" data-testid="accumulated-cost">
-                {formatUSD(job?.accumulated_cost_usd || 0)} /{' '}
-                {formatUSD(job?.cost_ceiling_usd || 0)}
+                <Ratio
+                  left={formatUSD(job?.accumulated_cost_usd || 0)}
+                  right={formatUSD(job?.cost_ceiling_usd || 0)}
+                />
               </div>
               <div className="text-gray-500 text-xs">
                 בסיס חישוב: {job?.cost_basis || 'none'}
@@ -1275,7 +1414,7 @@ export default function ExamGenerationSection() {
             </div>
             <p>
               שאלות עם הבחנה גבוהה מ-{distinctionThreshold.toFixed(1)}:{' '}
-              {stats.highDistinctionCount} מתוך {stats.totalValidDistinction}
+              <Ratio left={stats.highDistinctionCount} right={stats.totalValidDistinction} sep=" מתוך " />
             </p>
           </CardContent>
         </Card>
@@ -1291,7 +1430,7 @@ export default function ExamGenerationSection() {
             <Button
               className="hebrew-text whitespace-nowrap"
               disabled={questions.length === 0}
-              onClick={() => downloadDocx(false)}
+              onClick={() => requestExport(() => downloadDocx(false))}
             >
               ייצא מבחן (DOCX)
             </Button>
@@ -1299,14 +1438,14 @@ export default function ExamGenerationSection() {
               variant="outline"
               className="hebrew-text whitespace-nowrap"
               disabled={questions.length === 0}
-              onClick={() => downloadDocx(true)}
+              onClick={() => requestExport(() => downloadDocx(true))}
             >
               ייצא דף תשובות (DOCX)
             </Button>
             <Button
               variant="outline"
               className="hebrew-text whitespace-nowrap"
-              onClick={downloadXlsx}
+              onClick={() => requestExport(downloadXlsx)}
             >
               ייצוא שאלות בינה בלבד (Excel)
             </Button>
@@ -1314,7 +1453,7 @@ export default function ExamGenerationSection() {
               variant="outline"
               className="hebrew-text whitespace-nowrap"
               disabled={questions.length === 0}
-              onClick={downloadFullXlsx}
+              onClick={() => requestExport(downloadFullXlsx)}
             >
               ייצוא מבחן מלא (Excel)
             </Button>
@@ -1361,6 +1500,7 @@ export default function ExamGenerationSection() {
                     isMutating={mutating === q.instance_id}
                     onReplaceDb={handleReplaceDb}
                     onReplaceLlm={handleReplaceLlm}
+                    onEdit={handleEditStart}
                     readOnly={isReadOnly}
                   />
                 ))}
@@ -1386,6 +1526,100 @@ export default function ExamGenerationSection() {
             </Button>
             <Button className="hebrew-text" disabled={branching} onClick={handleBranch}>
               {branching ? 'יוצר גרסה...' : 'צור גרסה חדשה'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* WP28 §B3/§B4 -- edit an LLM-origin question's current text */}
+      <Dialog open={!!editingQuestion} onOpenChange={(open) => !open && handleEditCancel()}>
+        <DialogContent className="hebrew-text">
+          <DialogHeader>
+            <DialogTitle className="hebrew-text">עריכת שאלה</DialogTitle>
+            <DialogDescription className="hebrew-text">
+              עריכה זו חלה רק על שאלה זו במבחן הנוכחי ואינה משפיעה על מאגר
+              השאלות.
+            </DialogDescription>
+          </DialogHeader>
+          {editForm && (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-sm font-medium" htmlFor="edit-question">
+                  גוף השאלה
+                </label>
+                <Input
+                  id="edit-question"
+                  value={editForm.question}
+                  onChange={(e) => handleEditField('question', e.target.value)}
+                />
+              </div>
+              {[1, 2, 3, 4].map((n) => (
+                <div key={n} className="space-y-1">
+                  <label className="text-sm font-medium" htmlFor={`edit-answer${n}`}>
+                    תשובה {n}
+                  </label>
+                  <Input
+                    id={`edit-answer${n}`}
+                    value={editForm[`answer${n}`]}
+                    onChange={(e) => handleEditField(`answer${n}`, e.target.value)}
+                  />
+                </div>
+              ))}
+              <div className="space-y-1">
+                <label className="text-sm font-medium" htmlFor="edit-correct">
+                  התשובה הנכונה
+                </label>
+                <select
+                  id="edit-correct"
+                  className="w-full border rounded p-2 text-sm"
+                  value={editForm.correct_answer}
+                  onChange={(e) => handleEditField('correct_answer', Number(e.target.value))}
+                >
+                  {[1, 2, 3, 4].map((n) => (
+                    <option key={n} value={n}>
+                      תשובה {n}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {editError && (
+                <p role="alert" className="text-red-600 text-sm">
+                  {editError}
+                </p>
+              )}
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="hebrew-text" onClick={handleEditCancel}>
+              ביטול
+            </Button>
+            <Button className="hebrew-text" disabled={saving} onClick={handleEditSave}>
+              {saving ? 'שומר...' : 'שמירה'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* WP28 §B5 -- export confirmation when unresolved warnings remain */}
+      <Dialog open={!!exportConfirm} onOpenChange={(open) => !open && setExportConfirm(null)}>
+        <DialogContent className="hebrew-text">
+          <DialogHeader>
+            <DialogTitle className="hebrew-text">אישור ייצוא</DialogTitle>
+            <DialogDescription className="hebrew-text">
+              {/* DialogDescription does not forward arbitrary props (e.g.
+                  data-testid) onto its rendered <p> -- put it on this span. */}
+              <span data-testid="export-confirm-message">
+                במבחן קיימות {exportConfirm?.count} שאלות הדורשות בדיקה. האם
+                להמשיך בייצוא?
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="hebrew-text" onClick={() => setExportConfirm(null)}>
+              ביטול
+            </Button>
+            <Button className="hebrew-text" onClick={confirmExport}>
+              המשך בייצוא
             </Button>
           </DialogFooter>
         </DialogContent>

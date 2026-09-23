@@ -108,6 +108,12 @@ class AdapterRequest:
     audit_dir: Optional[str] = None
     #: pricing staleness threshold in days (owner policy default 30)
     pricing_stale_after_days: int = 30
+    #: WP28 §B2 -- bounded, structured hard-rejection records (the generator's
+    #: own ``HardRejectionFeedback`` shape) from prior same-category
+    #: operations, forwarded as-is to the generator so it never repeats an
+    #: already-demonstrated defect. Never defines semantic exclusion, never
+    #: bans a topic.
+    hard_rejection_feedback: list = field(default_factory=list)
 
 
 @dataclass
@@ -130,6 +136,16 @@ class AdapterResult:
     audit_path: Optional[str] = None
     failure_reason: Optional[str] = None
     rejected_candidate_ids: list = field(default_factory=list)
+    #: WP28 §B1 -- ``"clean"`` or ``"warning"`` when ``status == "accepted"``.
+    review_quality: str = "clean"
+    #: WP28 §B1 -- the (0 or 1) structured distractor warning(s), remapped to
+    #: the public field the generator's seven-field mapping always uses
+    #: (``correct_answer`` -> ``answer1``, ``distractor_1..3`` ->
+    #: ``answer2..4``): ``{"code", "field", "message_he"}``.
+    review_warnings: list = field(default_factory=list)
+    #: WP28 §B2 -- bounded, structured hard-rejection records produced by
+    #: *this* call's own failed attempts (never the ones supplied as input).
+    hard_rejection_feedback: list = field(default_factory=list)
 
     @property
     def accepted(self) -> bool:
@@ -202,6 +218,7 @@ def generate_category_question(
             source_facts_path=root / "config" / "source_fact_corrections.yaml",
             pricing_path=root / "config" / "pricing.yaml",
             pricing_stale_after_days=int(request.pricing_stale_after_days),
+            hard_rejection_feedback=list(request.hard_rejection_feedback or []),
         )
     except ValueError as exc:
         # unknown category / bad argument -> caller error surfaced as systemic
@@ -224,6 +241,28 @@ def _project_previous(previous_questions: list) -> list[dict]:
     return out
 
 
+#: WP28 §B1: the generator's internal distractor field naming -> the public
+#: field it always lands on, given the fixed seven-field mapping
+#: (``exam_generator.sequence._to_public_question``: correct answer always
+#: ``answer1``, distractors always ``answer2..4`` in order).
+_GENERATOR_FIELD_TO_PUBLIC = {
+    "correct_answer": "answer1",
+    "distractor_1": "answer2",
+    "distractor_2": "answer3",
+    "distractor_3": "answer4",
+    "question": "question",
+}
+
+
+def _remap_review_warnings(raw: list) -> list[dict]:
+    out = []
+    for w in raw or []:
+        w = dict(w)
+        w["field"] = _GENERATOR_FIELD_TO_PUBLIC.get(w.get("field"), w.get("field"))
+        out.append(w)
+    return out
+
+
 def _to_adapter_result(result: Any) -> AdapterResult:
     """Map a generator ``ProductionGenerationResult`` onto ``AdapterResult``."""
     common = dict(
@@ -242,6 +281,13 @@ def _to_adapter_result(result: Any) -> AdapterResult:
         warnings=[dict(w) for w in getattr(result, "warnings", []) or []],
         audit=None,
         audit_path=str(getattr(result, "audit_dir", "") or "") or None,
+        # WP28 §B2: only records newly produced by this call, unconditionally
+        # -- present on both success and failure, since a caller may need
+        # them even for a failed attempt (e.g. replace_llm keeping the old
+        # question while still learning from the failed attempt).
+        hard_rejection_feedback=[
+            dict(r) for r in getattr(result, "hard_rejection_feedback", []) or []
+        ],
     )
 
     if getattr(result, "status", None) == "success":
@@ -249,6 +295,8 @@ def _to_adapter_result(result: Any) -> AdapterResult:
             status="accepted",
             question=dict(result.question) if result.question else None,
             was_repaired=bool(getattr(result, "was_repaired", False)),
+            review_quality=str(getattr(result, "review_quality", "clean")),
+            review_warnings=_remap_review_warnings(getattr(result, "review_warnings", [])),
             **common,
         )
 

@@ -3,10 +3,90 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-22 · **Latest completed WP:** WP27R (persisted workflow
-phase, atomic Continue claim, and recovery — corrects two WP27 production-
-state gaps; outer-only, offline only, no live/provider call, `OPENAI_API_KEY`
-never accessed, generator untouched); see `WPs/WP27R_ARCHITECT_REPORT.md`.
+**Updated:** 2026-09-23 · **Latest completed WP:** WP28 (warning acceptance,
+persistent manual editing, hard-rejection failure memory, failed-replacement
+retention, and RTL/LTR numeric-ratio isolation — spans both repositories;
+offline only, no live/provider call, `OPENAI_API_KEY` never accessed). See
+`WPs/WP28_ARCHITECT_REPORT.md` and the generator-side
+`exam_generator/WPs/WP28G_ARCHITECT_REPORT.md`.
+
+Triggered by the read-only audit `WPs/PRE_WP28_EXAM_258FFEF8_AUDIT.md`
+against exam job `258ffef8-…`. Generator submodule re-pinned to
+`5200b531f559b9fcd963cb7a3ca22ebcc6f4a98d` (WP28G); the outer integration:
+
+- **Warning acceptance is now a first-class slot outcome.** The generator
+  adapter (`backend/src/integration/generator_adapter.py`) forwards the
+  generator's `review_quality`/`review_warnings` (remapping the generator's
+  internal `distractor_1..3`/`correct_answer` naming onto the public
+  `answer2..4`/`answer1` fields the outer app already uses everywhere), and
+  `_generate_one` (`backend/src/jobs/service.py`) persists them on the
+  `Slot` (`review_quality`, `review_warnings` — each with its own
+  `warning_id`/`resolved`/`resolved_by`/`resolved_at`) fresh on every new
+  acceptance. Exposed to the frontend via `GenerationMeta`
+  (`backend/src/integration/exam_question_dto.py`), never inside the
+  seven-field public question, and never in DOCX output (`GenerationMeta`
+  was already excluded from `docx_view()`).
+- **Bounded, per-category hard-rejection failure memory**
+  (`Job.hard_rejection_feedback`) is threaded into every generator call
+  (`_generate_one` reads the last `MAX_HARD_REJECTION_FEEDBACK_PER_CALL = 8`
+  records for that slot's category, stripping the store's own `recorded_at`
+  bookkeeping before handing them to the generator's strict
+  `HardRejectionFeedback` model) and grows from whatever new records that
+  same call's own failed attempts produced
+  (`_record_hard_rejection_feedback`, deduplicated by
+  `(bad_field, bad_value, failure_code)`). Never written for a warning or
+  clean acceptance; never folded into `category_history`.
+- **Persistent manual editing**: `PATCH /api/exam-jobs/<job_id>/questions/<instance_id>`
+  (`service.edit_llm_question`) edits the six public fields of the *current*
+  LLM-origin question in one slot, no provider call, no API key. Rejects a
+  database-origin slot, a missing slot, or a job mid-generation
+  (`job.status == "running"`); deterministic structural validation only
+  (non-empty trimmed text, four distinct answers, `correct_answer` a
+  strict `1..4` int). On success: appends an immutable
+  `Slot.edit_history` entry (before/after seven fields, affected warning
+  ids), updates `Slot.question` in place (identity/number/origin
+  untouched), sets `manually_edited = True`, and resolves exactly the
+  unresolved warning(s) whose own declared field was among the changed
+  ones. `branch_job` copies `review_quality`/`review_warnings`/
+  `manually_edited`/`edit_history` per slot and the whole
+  `hard_rejection_feedback` store, the same way `category_history` already
+  was.
+- **Export confirmation and edited text**: both XLSX exports
+  (`export_llm_xlsx`/`export_full_xlsx`) already read `slot.question`
+  directly, so a manual edit is reflected with no export-side change;
+  neither schema gained a `manually_edited` column (no safe extension
+  point — schema compatibility with the existing DB-upload/legacy contract
+  took priority, per the owner's explicit WP28 ruling). The DOCX path is
+  unaffected the same way (the frontend already strips job-only metadata
+  before that call). The frontend (`ExamGenerationSection.jsx`) gates every
+  export action behind a Hebrew confirmation dialog
+  (`unresolvedWarningCount()` in `examGen.js`) whenever any current
+  question still carries an unresolved warning; cancelling makes no
+  download request.
+- **Failed-replacement retention is now explicit**: a failed
+  `replace_via_llm` sets `slot.safe_error` to a fixed Hebrew sentence
+  ("לא נוצרה שאלה חלופית. השאלה המקורית נשמרה.") with the attempt
+  count/cost appended when available, instead of an ad hoc failure string —
+  `category_history` is still untouched on failure (unchanged from before
+  WP28), and the hard-rejection feedback from the failed attempts is still
+  persisted for later calls.
+- **RTL/LTR**: every "X / Y" numeric ratio on the exam-generation screen
+  (accepted count, LLM-accepted count, accumulated-vs-ceiling cost, the
+  distinction-threshold count) is now wrapped in one reusable `<Ratio>`
+  component rendering `<bdi dir="ltr">…</bdi>` — the surrounding Hebrew
+  layout is untouched; only the digits/operator are isolated.
+
+Full generator suite (submodule): 1025 collected, 0 failures. Outer backend
+suite: 310 passed. Outer frontend suite: 155 passed. Frontend production
+build: succeeds. See `WPs/WP28_ARCHITECT_REPORT.md` §7 for the exact counts
+and commands.
+
+---
+
+WP27R (below) remains the most recent prior outer-repo change — persisted
+workflow phase, atomic Continue claim, and recovery; outer-only, offline
+only, no live/provider call, `OPENAI_API_KEY` never accessed, generator
+untouched. See `WPs/WP27R_ARCHITECT_REPORT.md`.
 Supersedes the never-executed `WP25_Named_Exam_History_Branches_And_UI_Polish.md`.
 
 WP27R corrects, backward-compatibly, on top of the WP27 job model (WP27's

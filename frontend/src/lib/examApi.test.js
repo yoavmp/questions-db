@@ -61,6 +61,18 @@ describe('job endpoints', () => {
       message: 'another operation is already running',
     })
   })
+
+  it('updateQuestionManually PATCHes /exam-jobs/<id>/questions/<iid> with the six editable fields', async () => {
+    fetch.mockReturnValueOnce(okJson({ status: 'completed', questions: [] }))
+    const payload = {
+      question: 'q?', answer1: 'a1', answer2: 'a2', answer3: 'a3', answer4: 'a4', correct_answer: 2,
+    }
+    await api.updateQuestionManually('j1', 'iid', payload)
+    const [url, opts] = fetch.mock.calls[0]
+    expect(url).toMatch(/\/exam-jobs\/j1\/questions\/iid$/)
+    expect(opts.method).toBe('PATCH')
+    expect(JSON.parse(opts.body)).toEqual(payload)
+  })
 })
 
 describe('WP26 jobs-list / branch / exclusion-preview endpoints', () => {

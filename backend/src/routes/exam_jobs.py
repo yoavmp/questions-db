@@ -9,6 +9,7 @@ Routes (all under ``/api``)::
     PUT    /exam-jobs/<job_id>/cost-ceiling             -> raise/lower the cap (>= accumulated)
     POST   /exam-jobs/<job_id>/questions/<iid>/replace-db   -> swap in a DB question (any accepted slot)
     POST   /exam-jobs/<job_id>/questions/<iid>/replace-llm  -> regenerate a question (any accepted slot)
+    PATCH  /exam-jobs/<job_id>/questions/<iid>          -> WP28: manually edit a current LLM question
     GET    /exam-jobs/<job_id>/export.xlsx              -> accepted origin=llm questions only
     GET    /exam-jobs/<job_id>/export-full.xlsx         -> every current question, legacy schema (WP21)
     GET    /exam-jobs/readiness                         -> LLM readiness report
@@ -240,6 +241,25 @@ def replace_db(job_id, instance_id):
 def replace_llm(job_id, instance_id):
     try:
         job = service.replace_via_llm(job_id, instance_id, provider_factory=_provider_factory())
+    except service.JobError as exc:
+        return _err(str(exc), 404 if "not found" in str(exc) else 400)
+    except service.JobBusy as exc:
+        return _err(str(exc), 409)
+    except service.JobConflict as exc:
+        return _err(str(exc), 409)
+    return jsonify(service.result_view(job))
+
+
+@exam_jobs_bp.route("/exam-jobs/<job_id>/questions/<instance_id>", methods=["PATCH"])
+def edit_question(job_id, instance_id):
+    """WP28 §B3: persistently edit the current LLM-origin question in one
+    slot. No LLM call, no provider factory needed -- the owner is
+    authoritative for the content."""
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return _err("request body must be JSON", 400)
+    try:
+        job = service.edit_llm_question(job_id, instance_id, payload)
     except service.JobError as exc:
         return _err(str(exc), 404 if "not found" in str(exc) else 400)
     except service.JobBusy as exc:

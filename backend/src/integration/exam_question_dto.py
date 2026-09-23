@@ -47,6 +47,16 @@ class GenerationMeta:
     reviewer_confidence: Optional[float] = None
     audit_ref: Optional[str] = None
     outcome: str = "accepted"
+    #: WP28 §B1/§B4 -- ``"clean"`` or ``"warning"`` for the current LLM
+    #: question.
+    review_quality: str = "clean"
+    #: WP28 §B1/§B4 -- structured warnings (0 or 1), each ``{"warning_id",
+    #: "code", "field", "message_he", "resolved", "resolved_by",
+    #: "resolved_at"}``. Never part of ``public_seven``/``docx_view``.
+    review_warnings: list = field(default_factory=list)
+    #: WP28 §B3/§B4 -- true once the owner has manually edited this LLM
+    #: question at least once since it was last (re)generated.
+    manually_edited: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +67,9 @@ class GenerationMeta:
             "reviewer_confidence": self.reviewer_confidence,
             "audit_ref": self.audit_ref,
             "outcome": self.outcome,
+            "review_quality": self.review_quality,
+            "review_warnings": list(self.review_warnings),
+            "manually_edited": self.manually_edited,
         }
 
 

@@ -233,6 +233,42 @@ export function groupByCategory(questions) {
   return groups
 }
 
+// --- WP28 §B4/§B5 -- warning acceptance / manual editing -------------------
+
+// The six fields a current LLM-origin question's manual edit may change.
+export const EDITABLE_QUESTION_FIELDS = [
+  'question', 'answer1', 'answer2', 'answer3', 'answer4', 'correct_answer',
+]
+
+// Every unresolved structured warning across `questions` (each question's
+// `generation_meta.review_warnings`, when present) -- used to decide whether
+// an export needs a confirmation (WP28 §B5). A resolved warning, or a
+// database-origin question (which never carries `review_warnings`), never
+// counts.
+export function unresolvedWarningCount(questions) {
+  return (questions || []).reduce((sum, q) => {
+    const warnings = q.generation_meta?.review_warnings || []
+    return sum + warnings.filter((w) => !w.resolved).length
+  }, 0)
+}
+
+// Client-side mirror of the backend's deterministic structural validation
+// (never a substitute for it -- the backend re-validates independently).
+// Returns a single Hebrew error string, or '' when the draft is valid.
+export function validateQuestionEdit(draft) {
+  const textFields = ['question', 'answer1', 'answer2', 'answer3', 'answer4']
+  for (const f of textFields) {
+    if (!(draft[f] || '').trim()) return 'כל השדות חייבים להכיל טקסט'
+  }
+  const answers = ['answer1', 'answer2', 'answer3', 'answer4'].map((f) => draft[f].trim())
+  if (new Set(answers).size !== answers.length) return 'ארבע התשובות חייבות להיות שונות זו מזו'
+  const correct = Number(draft.correct_answer)
+  if (!Number.isInteger(correct) || correct < 1 || correct > 4) {
+    return 'יש לבחור תשובה נכונה אחת מבין 1 עד 4'
+  }
+  return ''
+}
+
 // --- per-question analytics display (WP21 §3, recovered legacy contract) --
 
 // Exact legacy convention (pre-WP19 QuestionCard): every raw historical value

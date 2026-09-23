@@ -128,6 +128,16 @@ export async function replaceViaLlm(jobId, instanceId) {
   return jsonOrThrow(resp)
 }
 
+// WP28 §B3 -- persistently edit the current LLM-origin question in one slot.
+// `payload` is the six editable fields (question, answer1..4, correct_answer).
+export async function updateQuestionManually(jobId, instanceId, payload) {
+  const resp = await fetch(
+    `${API_BASE_URL}/exam-jobs/${jobId}/questions/${instanceId}`,
+    { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+  )
+  return jsonOrThrow(resp)
+}
+
 // --- downloads ----------------------------------------------------
 // Two distinct, unambiguous exports (WP21 §5) -- one route/label per meaning:
 // LLM-only (unchanged since WP18/19, for later manual DB upload) vs. the full

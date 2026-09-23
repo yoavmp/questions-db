@@ -119,6 +119,88 @@ class ApprovingProvider:
         return ReviewResult(reviews=[review], selected_candidate_id=cid)
 
 
+class WarningAcceptingProvider(ApprovingProvider):
+    """WP28: accepts every candidate, but every review carries exactly one
+    structured distractor warning (the candidate is still a full acceptance
+    -- ``distractors_incorrect_and_plausible=True``)."""
+
+    name = "fake-warning-accepting"
+
+    def review_candidates(self, request, *, prompts):
+        self.review_calls += 1
+        from exam_generator.generation_models import (
+            CandidateReview, DistractorSupport, DistractorWarning,
+            PriorQuestionComparison, ReviewResult,
+        )
+
+        priors = [p.number for p in getattr(request, "previous_questions", [])]
+        cid = getattr(self, "_last_cid", "c0")
+        review = CandidateReview(
+            candidate_id=cid, grounded_in_context=True, avoids_superseded_source_facts=True,
+            category_relevant=True, exactly_one_correct_answer=True,
+            distractors_incorrect_and_plausible=True, distinct_from_previous_and_siblings=True,
+            hebrew_is_clear=True, required_english_preserved=True, no_undeclared_hebrew_paraphrase=True,
+            self_contained=True, semantically_distinct_from_previous=True,
+            previous_comparisons=[
+                PriorQuestionComparison(prior_number=n, same_learning_target=False,
+                                        overlap_type="none", reason="עוסק בעובדה שונה לחלוטין",
+                                        confidence=0.95)
+                for n in priors
+            ],
+            distractor_support=[
+                DistractorSupport(field="distractor_3", evidence_mode="source_mentioned",
+                                   reason="מושג אמיתי ומעוגן-מקור, אך מסוג שונה ממה שהשאלה מבקשת."),
+            ],
+            distractor_warnings=[
+                DistractorWarning(code="weak_distractor_type_mismatch", field="distractor_3",
+                                   message_he="מסיח 4 אינו מן הסוג שגוף השאלה מבקש."),
+            ],
+            confidence=0.95, reason="כל הקריטריונים עברו, מסיח אחד חלש.",
+            post_repair_approved=True, answer_identity_preserved=True,
+        )
+        return ReviewResult(reviews=[review], selected_candidate_id=cid)
+
+
+class DistractorHardRejectThenAcceptProvider(ApprovingProvider):
+    """WP28: the FIRST review call hard-rejects on a distractor-quality
+    defect (``distractors_incorrect_and_plausible=False`` +
+    ``distractor_support``); every later call accepts normally -- for
+    proving a later attempt/operation receives the resulting bounded
+    hard-rejection feedback."""
+
+    name = "fake-hard-reject-then-accept"
+
+    def __init__(self):
+        super().__init__()
+        self._rejected_once = False
+
+    def review_candidates(self, request, *, prompts):
+        self.review_calls += 1
+        if not self._rejected_once:
+            self._rejected_once = True
+            from exam_generator.generation_models import (
+                CandidateReview, DistractorSupport, ReviewResult,
+            )
+
+            cid = getattr(self, "_last_cid", "c0")
+            review = CandidateReview(
+                candidate_id=cid, grounded_in_context=True, avoids_superseded_source_facts=True,
+                category_relevant=True, exactly_one_correct_answer=True,
+                distractors_incorrect_and_plausible=False, distinct_from_previous_and_siblings=True,
+                hebrew_is_clear=True, required_english_preserved=True, no_undeclared_hebrew_paraphrase=True,
+                self_contained=True, semantically_distinct_from_previous=True,
+                previous_comparisons=[], distractor_support=[
+                    DistractorSupport(field="distractor_1", evidence_mode="none",
+                                       reason="אינו מופיע כלל בחומר המקור הרלוונטי."),
+                ],
+                confidence=0.9, reason="מסיח מומצא, אינו מעוגן במקור.",
+                post_repair_approved=False, answer_identity_preserved=True,
+            )
+            return ReviewResult(reviews=[review], selected_candidate_id=None,
+                                 no_selection_reason="distractor not grounded")
+        return super().review_candidates(request, prompts=prompts)
+
+
 class RejectingProvider(ApprovingProvider):
     """Generates a valid candidate but the reviewer fails it (a real, non-systemic
     rejection)."""
