@@ -363,11 +363,11 @@ Commit message: `WP30: prepare frontend local development`.
 - Fast-forward safety confirmed before pushing
   (`git merge-base --is-ancestor origin/main HEAD`) after a fresh
   `git fetch origin main`.
-- Final target `HEAD` after commit: recorded in the closing terminal
-  response of this WP (committed and pushed after this report file itself
-  was staged, so the SHA below reflects the report's own presence).
-- `git push origin main`: recorded in the same closing response, verified
-  fast-forward with no force flag used.
+- Final target `HEAD` after commit: **`e9aa45473f0cd4a5a5221c5fcadb11fa50dfcf90`**
+- `git push origin main` result: **success, fast-forward** —
+  `7e16b4b..e9aa454  main -> main`. Verified post-push:
+  `git rev-parse HEAD == git rev-parse origin/main ==
+  e9aa45473f0cd4a5a5221c5fcadb11fa50dfcf90`. No force flag used.
 
 ## 8. Unresolved blockers or deviations
 
