@@ -332,11 +332,11 @@ immediately before commit:**
 
 Commit message: `WP29: establish server working copy`.
 
-- Final target `HEAD` after commit: **`<FINAL_SHA>`**
-- `git push origin main` result: **`<PUSH_RESULT>`**
-
-(Both filled in immediately below in the closing terminal response of this
-WP, after the commit/push actually ran — not predicted in advance.)
+- Final target `HEAD` after commit: **`7f49e76c17742aa6314229e3f81681d7a1a52751`**
+- `git push origin main` result: **success, fast-forward** —
+  `f9b51c8..7f49e76  main -> main`. Verified post-push:
+  `git rev-parse HEAD == git rev-parse origin/main ==
+  7f49e76c17742aa6314229e3f81681d7a1a52751`.
 
 **Source repository catch-up**, once the reader is ready (source stays
 exactly at `f9b51c8098d99e21991bbd06812e55adb6c7e90d` until this is run —
