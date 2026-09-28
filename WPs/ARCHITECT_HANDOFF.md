@@ -3,17 +3,46 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-28 · **Latest completed WP:** WP29 (server working copy
-+ host-specific backend environment — migration/setup only, no code change,
-no live/provider call, `OPENAI_API_KEY` never read/configured). See
+**Updated:** 2026-09-28 · **Latest completed WP:** WP30 (frontend
+dependencies + offline local application test, on the WP29 mounted working
+copy — local-development setup only, no code change, no live/provider call,
+`OPENAI_API_KEY` never read/configured). See `WPs/WP30_ARCHITECT_REPORT.md`.
+
+Frontend dependencies are now installed on the mounted working copy
+(`frontend/node_modules/`, via clean `npm ci` from the committed
+`package-lock.json` — never copied from another machine, git-ignored, and
+itself host/platform-specific exactly like the WP29 backend venv). The
+complete frontend test suite (155 tests) and production build both pass
+offline. A bounded backend+frontend smoke test (no API key, HTTP-level —
+no browser-automation tool is installed in this environment) confirmed:
+`GET /api/exam-jobs/readiness` reports `db_only_available: true` with
+`OPENAI_API_KEY` absence as the *only* blocking reason; the frontend page
+and a harmless DB-only endpoint (`/api/test/categories`) both respond
+correctly; every process this WP started was stopped and its port
+confirmed free afterward, without touching an unrelated backend instance
+the owner already had running locally on port 4567 at the time (a
+pre-existing process this WP correctly left alone — see
+`WPs/WP30_ARCHITECT_REPORT.md` §4 for why). `docs/SERVER_WORKING_COPY_SETUP.md`
+now also documents the exact two-terminal local-run commands, real ports,
+and what does/doesn't need a key. Full detail in
+`WPs/WP30_ARCHITECT_REPORT.md`.
+
+---
+
+WP29 (below) remains the most recent prior **repository-establishing**
+change — cloned this second working copy onto the mounted share and built
+its host-specific backend venv; migration/setup only, no live/provider
+call, `OPENAI_API_KEY` never read/configured. See
 `WPs/WP29_ARCHITECT_REPORT.md`.
 
 A second Git-connected working copy of this outer repo (+ the same pinned
 `exam_generator` submodule) now exists at
 `/Volumes/home/Lab/Exam_Questions_Website/questions-db`, on a mounted SMB
-share. It carries its own host-specific backend virtualenv at
-`backend/.venvs/<sanitized-hostname>-py<major.minor>/` (never shared/reused
-across machines — see `docs/SERVER_WORKING_COPY_SETUP.md`, new in WP29) and
+share. It carries its own host-specific backend virtualenv (created by WP29
+at `backend/.venvs/joes-imac-py3.12/`; subsequently renamed on disk, outside
+either WP, to `backend/.venvs/yoav-py3.12/` — same environment, see
+`WPs/WP30_ARCHITECT_REPORT.md` §1 for how WP30 confirmed and used it; never
+shared/reused across machines — see `docs/SERVER_WORKING_COPY_SETUP.md`) and
 its own copy of the durable, Git-ignored runtime data
 (`backend/src/database/app.db` snapshot, `artifacts/exam_jobs/`,
 `exam_generator/Data/`), verified byte-for-byte against the source on this

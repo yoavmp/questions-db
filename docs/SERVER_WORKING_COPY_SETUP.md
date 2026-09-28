@@ -1,11 +1,13 @@
-# Server working copy and host-specific backend environment (WP29)
+# Server working copy and host-specific backend environment (WP29 + WP30)
 
 This document explains what this working copy is, why its Python environment
 is host-specific, and how another Mac can set up its **own** equivalent
-environment from the same mounted share. It intentionally does **not**
-configure production services, a reverse proxy, authentication, public/network
-access, or an `OPENAI_API_KEY`. That is deferred to a later, explicitly
-production-focused WP.
+environment from the same mounted share (WP29), plus how to install the
+frontend's dependencies and run backend + frontend together locally with no
+API key (WP30). It intentionally does **not** configure production services,
+a reverse proxy, authentication, public/network access, or an
+`OPENAI_API_KEY`. That is deferred to a later, explicitly production-focused
+WP.
 
 ## What the mounted path represents
 
@@ -141,6 +143,113 @@ verification unless you have a specific, bounded reason to — and stop
 whatever you start as soon as you are done. `run.py` runs the Flask
 **development** server in debug mode; it is not a readiness check.
 
+> **Note on this specific mounted copy:** the backend environment currently
+> installed here lives at `backend/.venvs/yoav-py3.12/` (renamed, after WP29
+> first created it as `backend/.venvs/joes-imac-py3.12/`, to identify it by
+> owner rather than hostname). Its `pyvenv.cfg` still records the original
+> creation path — that mismatch is expected after a rename and is not a sign
+> of a broken environment; `pip check` and the import/readiness/test
+> commands above all pass unmodified from it. The general naming rule above
+> (name a *new* environment after the host that creates it) still applies to
+> any environment you create yourself.
+
+## Frontend: dependencies and running the app locally (WP30)
+
+Verified on this Mac: **Node v24.4.1**, **npm 11.4.2** (`node --version`,
+`npm --version`). Any reasonably current Node 20+/npm 10+ should work; the
+frontend does not pin a `packageManager` field, and only `package-lock.json`
+is committed (no `yarn.lock`/`pnpm-lock.yaml`) — **npm** is the authoritative
+package manager for this project.
+
+### Installing frontend dependencies (clean, from the lockfile)
+
+```bash
+cd /Volumes/home/Lab/Exam_Questions_Website/questions-db/frontend
+npm ci
+```
+
+`npm ci` installs **exactly** what `package-lock.json` records — it never
+upgrades a version and never rewrites the lockfile (unlike `npm install`,
+which can silently do both). If `npm ci` ever fails because the lockfile and
+`package.json` have drifted apart, stop and fix that drift deliberately; do
+not reach for `npm install` as a quiet workaround.
+
+`frontend/node_modules/` is git-ignored. Like the backend venv, it is
+**host/platform-specific** (native build steps, OS-specific binaries in some
+transitive tooling) — never copy it from one computer to another, and never
+commit it. Reinstall with `npm ci` on every machine instead.
+
+`npm ci` reaches the public npm registry to download packages (ordinary,
+expected network access for a package manager) — it makes no call to
+OpenAI or any other LLM/provider endpoint.
+
+After installing, `npm ls --depth=0` should show every top-level dependency
+resolved with no `UNMET DEPENDENCY`/`invalid` lines. `npm audit` may report
+known vulnerabilities in the installed tooling (dev-only build/test
+dependencies, not application runtime code); review it periodically, but
+do not run `npm audit fix`/`--force` casually — that changes pinned
+versions and belongs in its own deliberate WP, not routine local setup.
+
+### Running backend + frontend locally, in two terminals, no API key
+
+**Terminal 1 — backend** (uses the environment verified above):
+
+```bash
+cd /Volumes/home/Lab/Exam_Questions_Website/questions-db/backend
+unset OPENAI_API_KEY
+../.venvs/yoav-py3.12/bin/python run.py
+```
+
+(Adjust the venv name if your own environment is named differently, e.g.
+`.venvs/<your-hostslug>-py3.12/bin/python`.) This serves the API at
+**`http://localhost:4567`** (hardcoded in `run.py`; the frontend's
+`API_BASE_URL` default points at exactly this address).
+
+**Terminal 2 — frontend:**
+
+```bash
+cd /Volumes/home/Lab/Exam_Questions_Website/questions-db/frontend
+npm run dev
+```
+
+This serves the app at **`http://localhost:3000`** (and on the machine's
+LAN IP at the same port — see `frontend/vite.config.js`'s `server.port`).
+Open `http://localhost:3000` in a browser.
+
+### What works without `OPENAI_API_KEY`, and what does not
+
+With no key set, `GET /api/exam-jobs/readiness` reports
+`db_only_available: true` and its only `blocking_reasons` entry is the
+missing key itself (confirm the generator import / local Data / category
+mapping / selected-models checks all read `ok` — if anything else is
+`blocking` too, that is a real environment problem, not the expected
+key-only gap). Concretely:
+
+- **Works with no key:** browsing the question bank (`/api/test/categories`
+  and friends), and creating/opening an exam job's **DB-selection** phase
+  (`db_review`) — choosing/reviewing database-sourced questions.
+- **Requires a key:** anything that calls the LLM generator — the
+  `continue-llm` generation step, LLM-side retries/replacements, and any
+  other paid operation. These stay unavailable (safely, with a clear
+  reason) until `OPENAI_API_KEY` is set — which remains outside the scope
+  of this document.
+
+### Stopping each server
+
+- Backend: `Ctrl+C` in its terminal (plain `python run.py`, no reloader
+  child to worry about). If it was started detached/backgrounded instead,
+  find and stop it with `lsof -iTCP:4567 -sTCP:LISTEN` then `kill <pid>`,
+  and confirm the port is free afterward (`lsof -iTCP:4567` prints nothing).
+- Frontend: `Ctrl+C` in its terminal. `npm run dev` spawns Vite as a child
+  process; if you backgrounded it, `lsof -iTCP:3000 -sTCP:LISTEN` then
+  `kill` **both** the `npm` and the child `vite`/`node` PID it started, and
+  confirm `lsof -iTCP:3000` prints nothing afterward.
+- Before starting either server, it is worth checking whether one is
+  already running (e.g. `lsof -iTCP:4567 -sTCP:LISTEN`) — this is a shared
+  mounted copy, and someone else may already have a backend or frontend
+  instance up. Never kill a process you did not start yourself without
+  confirming with whoever did.
+
 ## Git / submodule commands
 
 ```bash
@@ -250,3 +359,17 @@ a throwaway `touch` in the share root), and confirm no one else has the
 target directory locked open. Do not `chmod`/`chown` the share to work
 around this without the owner's approval — fix the mount/account permissions
 instead.
+
+**`npm: command not found`** — Node.js is not installed (or not on `PATH`)
+on this Mac. Install a current Node LTS (e.g. from nodejs.org, or `brew
+install node`), open a new terminal so `PATH` picks it up, and re-check with
+`node --version && npm --version` before retrying `npm ci`.
+
+**`vite: command not found`** (from `npm run dev`/`npm run build`) — almost
+always means `npm ci` was skipped, failed partway, or was run in the wrong
+directory: `vite` is a dependency installed into
+`frontend/node_modules/.bin/`, not a global tool. Re-run `npm ci` from
+`frontend/` and let it finish to completion (it can be slow over this
+mounted share — keep waiting rather than assuming it hung), then retry.
+Never install `vite` globally as a workaround; that can silently diverge
+from the pinned version in `package-lock.json`.
