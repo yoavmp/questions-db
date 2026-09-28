@@ -42,6 +42,9 @@ __pycache__/
 venv/
 backend/venv/
 backend/idoVenv/
+# WP29: host-specific migration-stage environments, one per machine; never
+# shared or reused across hosts, so never tracked.
+backend/.venvs/
 backend/michalVenv/
 backend/MichalVenvNew/
 # any *venv* directory created beside the backend

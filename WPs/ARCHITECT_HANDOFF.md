@@ -3,12 +3,33 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-23 · **Latest completed WP:** WP28 (warning acceptance,
-persistent manual editing, hard-rejection failure memory, failed-replacement
-retention, and RTL/LTR numeric-ratio isolation — spans both repositories;
-offline only, no live/provider call, `OPENAI_API_KEY` never accessed). See
-`WPs/WP28_ARCHITECT_REPORT.md` and the generator-side
-`exam_generator/WPs/WP28G_ARCHITECT_REPORT.md`.
+**Updated:** 2026-09-28 · **Latest completed WP:** WP29 (server working copy
++ host-specific backend environment — migration/setup only, no code change,
+no live/provider call, `OPENAI_API_KEY` never read/configured). See
+`WPs/WP29_ARCHITECT_REPORT.md`.
+
+A second Git-connected working copy of this outer repo (+ the same pinned
+`exam_generator` submodule) now exists at
+`/Volumes/home/Lab/Exam_Questions_Website/questions-db`, on a mounted SMB
+share. It carries its own host-specific backend virtualenv at
+`backend/.venvs/<sanitized-hostname>-py<major.minor>/` (never shared/reused
+across machines — see `docs/SERVER_WORKING_COPY_SETUP.md`, new in WP29) and
+its own copy of the durable, Git-ignored runtime data
+(`backend/src/database/app.db` snapshot, `artifacts/exam_jobs/`,
+`exam_generator/Data/`), verified byte-for-byte against the source on this
+Mac at migration time. No production service, reverse proxy, authentication,
+public/network exposure, or `OPENAI_API_KEY` was configured on that copy —
+that is deliberately deferred to a later WP. Full detail, exact SHAs, and
+verification commands/results in `WPs/WP29_ARCHITECT_REPORT.md`.
+
+---
+
+WP28 (below) remains the most recent prior **code-changing** outer-repo
+change — warning acceptance, persistent manual editing, hard-rejection
+failure memory, failed-replacement retention, and RTL/LTR numeric-ratio
+isolation — spans both repositories; offline only, no live/provider call,
+`OPENAI_API_KEY` never accessed. See `WPs/WP28_ARCHITECT_REPORT.md` and the
+generator-side `exam_generator/WPs/WP28G_ARCHITECT_REPORT.md`.
 
 Triggered by the read-only audit `WPs/PRE_WP28_EXAM_258FFEF8_AUDIT.md`
 against exam job `258ffef8-…`. Generator submodule re-pinned to
