@@ -366,8 +366,16 @@ frontend/src/components/ExamGenerationSection.wp31.test.jsx (new)
   updated to match (confirmed equal to the submodule's actual `HEAD` via a
   direct comparison, §1 above was already re-run against this pin with the
   full backend suite green).
-- Outer commit SHA, push status, and final outer `git status` are recorded
-  in a follow-up commit to this same report (established WP convention).
+- Outer commit `b8e018d90230026ee2a7c79dacd346360664a55b`
+  ("WP31: credential circuit breaker, pricing cache wiring, CORS/editing
+  fix, single terminal summary"), branch `main`. Pushed to `origin`
+  (`https://github.com/yoavmp/questions-db.git`); `git ls-remote origin
+  main` confirms the remote's `main` is exactly
+  `b8e018d90230026ee2a7c79dacd346360664a55b`. Final `git status --short`:
+  clean apart from the three pre-existing untracked owner WP-audit files
+  that were already untracked at preflight (`WPs/PRE_WP25_LATEST_EXAM_REVIEW.md`,
+  `WPs/PRE_WP26R_AUDIT.md`, `WPs/PRE_WP28_EXAM_258FFEF8_AUDIT.md`) —
+  deliberately left untouched, not part of this WP's scope.
 
 ## 10. Deviations, unresolved risks, owner decisions needed
 
