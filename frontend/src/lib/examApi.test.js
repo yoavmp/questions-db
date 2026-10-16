@@ -75,6 +75,36 @@ describe('job endpoints', () => {
   })
 })
 
+describe('WP31 Part C - network/CORS failures surface a Hebrew message', () => {
+  it('a rejected fetch() (CORS block / backend down) raises the Hebrew network message, not the raw browser error', async () => {
+    fetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    await expect(api.fetchJob('j1')).rejects.toMatchObject({
+      message: api.NETWORK_ERROR_MESSAGE_HE,
+      isNetworkError: true,
+    })
+  })
+
+  it('keeps the original browser error reachable via .cause for developer diagnostics', async () => {
+    const original = new TypeError('NetworkError when attempting to fetch resource.')
+    fetch.mockRejectedValueOnce(original)
+    try {
+      await api.updateQuestionManually('j1', 'iid', { question: 'q' })
+      expect.unreachable()
+    } catch (err) {
+      expect(err.message).toBe(api.NETWORK_ERROR_MESSAGE_HE)
+      expect(err.cause).toBe(original)
+    }
+  })
+
+  it('an HTTP-level (non-2xx) error is unaffected -- still carries the backend reason, not the network message', async () => {
+    fetch.mockReturnValueOnce(errJson(409, { error: 'another operation is already running' }))
+    await expect(api.replaceFromDb('j1', 'iid')).rejects.toMatchObject({
+      status: 409,
+      message: 'another operation is already running',
+    })
+  })
+})
+
 describe('WP26 jobs-list / branch / exclusion-preview endpoints', () => {
   it('fetchJobsList GETs /exam-jobs and returns the jobs array', async () => {
     fetch.mockReturnValueOnce(okJson({ jobs: [{ job_id: 'j1' }, { job_id: 'j2' }] }))

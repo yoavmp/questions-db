@@ -3,10 +3,102 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-09-28 · **Latest completed WP:** WP30 (frontend
-dependencies + offline local application test, on the WP29 mounted working
-copy — local-development setup only, no code change, no live/provider call,
-`OPENAI_API_KEY` never read/configured). See `WPs/WP30_ARCHITECT_REPORT.md`.
+**Updated:** 2026-10-16 · **Latest completed WP:** WP31 — four runtime
+defects found in real local use, corrected and tested offline; no
+live/provider call (one unauthenticated HTTPS pricing-doc GET on the
+generator side only — never touches `OPENAI_API_KEY`). Spans this outer
+repo and `exam_generator`; generator submodule re-pinned to
+`303cf394cc0b9839c459d1e56f8784e147e80e9f` (WP31G). See
+`WPs/WP31_ARCHITECT_REPORT.md` and the generator-side
+`exam_generator/WPs/WP31G_ARCHITECT_REPORT.md`.
+
+1. **Invalid-key (401) calls were retried and charged a conservative cost
+   despite zero billable usage.** Root cause was generator-side (a `401`/
+   `openai.AuthenticationError` was folded into the same bucket as every
+   other systemic failure, which prices a no-response attempt at its
+   conservative bound — see the generator report). This repo's fix: a new
+   `"authentication_failure"` result status (`backend/src/integration/
+   generator_adapter.py`'s `FailureKind` whitelist) drives a new
+   `_generate_one` branch (`backend/src/jobs/service.py`) that marks the
+   slot `"failed"` with a fixed, actionable, secret-free Hebrew message
+   (`AUTH_FAILURE_HEBREW_MESSAGE`, never the raw internal reason) and trips
+   a new exam-level credential circuit breaker
+   (`_trip_auth_circuit_breaker`): every other still-`"queued"` LLM slot in
+   the **whole job** (not just the current category) is marked the same
+   way, with **no further provider call**, from whichever entry point
+   reached the failure first (initial run, manual retry, or LLM
+   replacement — the breaker lives inside the one shared `_generate_one`,
+   so it applies uniformly everywhere). `_run_llm_slots` gained a matching
+   `stopped_by_auth_failure` break (mirroring the pre-existing
+   `stopped_by_ceiling` pattern) plus a defensive `if slot.status !=
+   "queued": continue` guard, so an already-blocked slot is never
+   re-sent to the provider just because the loop reached it next.
+2. **The bundled pricing snapshot was stale.** Entirely generator-side —
+   manually re-verified `gpt-5.6-terra` against the live official pricing
+   doc on 2026-10-16 (no numerical price changed) and added a safe,
+   Git-ignored, 7-day-TTL auto-refresh cache
+   (`exam_generator/src/exam_generator/pricing_refresh.py`) with HTTPS-only/
+   host-allowlisted fetch, exact-model-id matching, atomic writes, and a
+   safe fallback chain on any failure. This repo opts every real call in to
+   it: `generator_adapter.py` now passes
+   `pricing_cache_path=os.environ.get("EXAM_GENERATOR_PRICING_CACHE_PATH",
+   <default artifacts path>)`, and `backend/tests/conftest.py` gained an
+   autouse fixture seeding an isolated, pre-seeded-fresh cache per test so
+   no backend test ever risks a network call. Full detail (the refresh
+   mechanism, concurrency guards, fallback policy, and the free live smoke
+   test) is entirely in the generator report.
+3. **Manual LLM-question editing was broken by a missing CORS preflight
+   authorization.** Root cause:
+   `backend/src/main.py`'s `flask_cors.CORS(...)` call listed `methods=
+   ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']` — **`PATCH` was missing**,
+   and `flask_cors` only emits `Access-Control-Allow-Methods`/`-Headers` at
+   all when the preflight's requested method is itself in that list (read
+   directly from `flask_cors.core.get_cors_headers`'s source) — so the
+   browser's edit preflight came back with `Access-Control-Allow-Origin`
+   but neither of the other two headers, and never sent the real `PATCH`.
+   Fixed by factoring the whole CORS policy out of `main.py` into a new
+   `backend/src/cors_config.py` (`DEV_FRONTEND_ORIGINS` — an explicit
+   `localhost:3000`/`127.0.0.1:3000` allowlist, never the previous
+   unrestricted `origins='*'` wildcard — and `ALLOWED_METHODS`, now
+   including `PATCH`), callable and testable without importing `main.py`
+   itself. `frontend/src/lib/examApi.js` also replaced the generic
+   browser `"Failed to fetch"` with a `safeFetch` wrapper around every API
+   call: a rejected `fetch()` (any network/CORS-level failure) now raises a
+   fixed Hebrew message (console keeps the original error for developers)
+   instead of the raw browser text; an HTTP-level non-2xx response is
+   completely unaffected. The actual `PATCH` itself (`service.
+   edit_llm_question`, unchanged) still makes zero provider calls, persists
+   through a store reload, and reaches both export paths — reconfirmed by a
+   new end-to-end test, on top of WP28's own already-thorough coverage.
+4. **Each terminal job summary printed twice per operation.**
+   `service._print_terminal_summary` called both `log.warning(line)` *and*
+   `print(line, flush=True)` with the identical string; the `"exam_jobs"`
+   logger has no handler configured anywhere in this app, so Python
+   logging's own `lastResort` handler wrote that same line to `stderr`
+   (confirmed directly — its default formatter is bare `%(message)s`) while
+   `print` wrote it to `stdout`; both land in the same terminal window.
+   This was never a value-level duplicate from two operations — always two
+   separate writes from one — so the fix removes the redundant
+   `log.warning` call (and the now-dead `import logging`), keeping `print`
+   as the one canonical channel. The pre-existing
+   `test_wp20_terminal_cost_log.py` suite (which only ever captured
+   `stdout` via `capsys`, and so could never have caught this specific
+   stdout+stderr duplication) still passes unchanged, confirming the single
+   channel still fires exactly once per operation.
+
+Full test/build counts, the CORS/pricing smoke-test evidence, the one
+pre-existing-and-unrelated generator test failure (a spelling-audit
+allowlist gap in a WP28G report file this WP never touched), and the
+mid-session `origin/main` fast-forward (WP29+WP30 landed upstream while
+this WP was in progress; resolved with a clean stash/merge/restore, zero
+conflicts, zero file overlap) are all in `WPs/WP31_ARCHITECT_REPORT.md`.
+
+---
+
+WP30 (below) remains the most recent prior **local-development-setup**
+change — frontend dependencies + offline local application test, on the
+WP29 mounted working copy; no code change, no live/provider call,
+`OPENAI_API_KEY` never read/configured. See `WPs/WP30_ARCHITECT_REPORT.md`.
 
 Frontend dependencies are now installed on the mounted working copy
 (`frontend/node_modules/`, via clean `npm ci` from the committed

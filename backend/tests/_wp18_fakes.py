@@ -226,6 +226,22 @@ class RejectingProvider(ApprovingProvider):
         return ReviewResult(reviews=[review], selected_candidate_id=None, no_selection_reason="rejected")
 
 
+class InvalidKeyProvider(ApprovingProvider):
+    """WP31 Part A: simulates an OpenAI ``401``/``AuthenticationError`` on
+    every generation call -- never reaches review. Counts calls like every
+    other fake here so a test can assert exactly how many were made."""
+
+    name = "fake-invalid-key"
+
+    def generate_candidates(self, request, *, prompts):
+        self.generation_calls += 1
+        from exam_generator.providers import ProviderAuthenticationError
+
+        raise ProviderAuthenticationError(
+            "generate request rejected: authentication failed (invalid or missing API key)"
+        )
+
+
 class Dispatch:
     """One provider object that routes each call to a per-category delegate,
     creating an :class:`ApprovingProvider` on first use of a category."""

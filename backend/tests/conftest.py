@@ -67,14 +67,32 @@ def jobs_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pricing_cache_isolated(tmp_path, monkeypatch):
+    """WP31 Part B: every backend test gets its own isolated, pre-seeded
+    *fresh* pricing cache (exactly the real bundled numbers), so
+    ``generate_category_question`` never attempts a network refresh merely
+    because no cache yet exists on disk -- and never touches the real
+    runtime cache under ``exam_generator/artifacts/``."""
+    from exam_generator.pricing_refresh import seed_cache_from_bundled
+
+    generator_root = _BACKEND.parent / "exam_generator"
+    cache_path = tmp_path / "pricing_cache_seed" / "openai_pricing_cache.yaml"
+    seed_cache_from_bundled(cache_path, generator_root / "config" / "pricing.yaml")
+    monkeypatch.setenv("EXAM_GENERATOR_PRICING_CACHE_PATH", str(cache_path))
+
+
+@pytest.fixture(autouse=True)
 def _wp18_no_network(request, monkeypatch):
-    """Block real sockets for every WP18 test; the fakes never need one."""
-    if "wp18" not in request.node.nodeid:
-        return
+    """Block real sockets for every backend test; the fakes never need one.
+
+    WP31: broadened from WP18-only to every test in this suite, so a future
+    accidental network dependency (e.g. the generator's pricing-doc refresh,
+    reached transitively through ``generate_category_question``) fails
+    loudly here instead of silently reaching the network."""
     import socket
 
     def _no_connect(*a, **k):  # pragma: no cover
-        raise AssertionError("network access attempted during a WP18 test")
+        raise AssertionError("network access attempted during a backend test")
 
     monkeypatch.setattr(socket.socket, "connect", _no_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", _no_connect)

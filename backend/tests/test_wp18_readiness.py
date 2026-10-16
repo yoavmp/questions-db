@@ -30,8 +30,11 @@ def test_missing_key_blocks_llm_only_not_db(monkeypatch):
 
 
 def test_stale_pricing_warns_but_does_not_block(llm_ready):
-    # the submodule snapshot is a few days old; a 0-day threshold makes it "stale"
-    rep = R.readiness_report(pricing_stale_days=0)
+    # WP31: a -1 threshold makes ANY snapshot "stale" regardless of its real
+    # verified_at age (which drifts as wall-clock time passes, and is zero
+    # the moment the bundled snapshot is freshly re-verified) -- the point
+    # of this test is "stale never blocks", not a specific elapsed age.
+    rep = R.readiness_report(pricing_stale_days=-1)
     assert rep["ready_for_llm"] is True                 # stale never blocks
     assert rep["pricing"]["stale"] is True
     assert any("old" in w for w in rep["warnings"])

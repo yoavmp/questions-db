@@ -21,7 +21,6 @@ Design points enforced here:
 from __future__ import annotations
 
 import json
-import logging
 import random
 import threading
 from datetime import datetime
@@ -41,8 +40,6 @@ from src.jobs.model import (
 )
 from src.utils.category_order import CATEGORY_ORDER
 
-log = logging.getLogger("exam_jobs")
-
 #: process-wide: only one generating operation runs at any time
 _RUN_LOCK = threading.Lock()
 
@@ -54,6 +51,16 @@ ProviderFactory = Callable[[], Any]  # returns a provider or None
 #: deduplicated record for audit/history, this only bounds the prompt
 #: contribution actually sent.
 MAX_HARD_REJECTION_FEEDBACK_PER_CALL = 8
+
+
+#: WP31 Part A §3/§4 -- the one fixed, actionable, secret-free Hebrew message
+#: shown for a definite provider credential failure (never the raw internal
+#: diagnostic, which is never shown to the operator or exposed in any public
+#: response/log). Reused for every slot the exam-level circuit breaker blocks.
+AUTH_FAILURE_HEBREW_MESSAGE = (
+    "מפתח ה-API של OpenAI שגוי או חסר בשרת. יש לתקן את מפתח ה-API "
+    "בהגדרות השרת (OPENAI_API_KEY) ולהפעיל את השרת מחדש."
+)
 
 
 class JobError(ValueError):
@@ -615,10 +622,32 @@ def _generate_one(job: Job, slot: Slot, *, kind: str, provider: Any,
     elif result.status == "cost_ceiling":
         slot.status = "cost_ceiling"
         slot.safe_error = result.failure_reason
+    elif result.status == "authentication_failure":
+        # WP31 Part A §3/§4: a definite provider credential failure -- never
+        # the raw internal reason (it may itself echo a redacted key
+        # fragment), always this fixed actionable Hebrew message. Trips the
+        # exam-level circuit breaker for every OTHER still-queued LLM slot
+        # in this job, regardless of which entry point reached here.
+        slot.status = "failed"
+        slot.safe_error = AUTH_FAILURE_HEBREW_MESSAGE
+        _trip_auth_circuit_breaker(job, except_slot_id=slot.slot_id)
     else:
         slot.status = "failed"
         slot.safe_error = result.failure_reason
     return result
+
+
+def _trip_auth_circuit_breaker(job: Job, *, except_slot_id: str) -> None:
+    """WP31 Part A §4: after the first definite authentication failure, never
+    send another queued LLM slot in this job to the provider. Every other
+    still-``queued`` LLM slot is marked the same safe, actionable failure
+    with zero attempts/cost -- no provider call is made for it, and no
+    cost-ledger entry is added for it either."""
+    job.safe_error = AUTH_FAILURE_HEBREW_MESSAGE
+    for s in job.slots:
+        if s.kind == "llm" and s.status == "queued" and s.slot_id != except_slot_id:
+            s.status = "failed"
+            s.safe_error = AUTH_FAILURE_HEBREW_MESSAGE
 
 
 # --------------------------------------------------------------------------- #
@@ -642,12 +671,18 @@ def _run_llm_slots(job: Job, *, provider: Any) -> bool:
     sequential loop.
     """
     stopped_by_ceiling = False
+    stopped_by_auth_failure = False
     for plan in sorted(job.categories, key=lambda p: p.order_index):
-        if stopped_by_ceiling:
+        if stopped_by_ceiling or stopped_by_auth_failure:
             break
         llm_slots = [s for s in job.slots
                      if s.category == plan.category and s.kind == "llm" and s.status == "queued"]
         for slot in sorted(llm_slots, key=lambda s: s.number):
+            # a slot already claimed by this same breaker (set on an earlier
+            # slot's call, elsewhere in this same snapshot) must never still
+            # be sent to the provider just because the loop reached it next.
+            if slot.status != "queued":
+                continue
             # readiness immediately before the (billable) call
             if provider is None:
                 report = readiness_report()
@@ -666,6 +701,13 @@ def _run_llm_slots(job: Job, *, provider: Any) -> bool:
                 break
             if slot.status == "cost_ceiling":
                 stopped_by_ceiling = True
+                break
+            if result is not None and result.status == "authentication_failure":
+                # WP31 Part A §4: the exam-level credential circuit breaker
+                # already marked every other queued LLM slot (job-wide) as
+                # failed inside ``_generate_one`` -- stop iterating entirely,
+                # never call the provider again for the rest of this job.
+                stopped_by_auth_failure = True
                 break
     return stopped_by_ceiling
 
@@ -953,6 +995,18 @@ def _print_terminal_summary(job: Job, *, operation: str) -> None:
     Carries only job id, operation, cumulative cost, pricing basis, remaining
     ceiling and warnings -- never prompts, provider responses, question
     content or secrets.
+
+    WP31 Part D: this used to ALSO call ``log.warning(line)`` right before
+    the ``print`` below. The "exam_jobs" logger has no handler configured
+    anywhere in this app, so that call was silently picked up by Python
+    logging's own ``lastResort`` handler and written to ``stderr`` with no
+    prefix -- byte-identical to the following ``print``'s ``stdout`` line.
+    Both streams land in the same terminal, so one HTTP operation produced
+    two visually-identical lines. The fix is not to filter a repeated value
+    (the two lines were never the *same write*, so no content-based
+    de-duplication could ever be correct here) but to emit through exactly
+    one channel -- the ``print`` below, which is also what the existing
+    test suite already asserts happens exactly once via ``capsys``.
     """
     s = job.terminal_summary or _summary_dict(job)
     header = _OPERATION_HEADERS.get(operation, f"EXAM JOB UPDATED ({operation})")
@@ -964,7 +1018,6 @@ def _print_terminal_summary(job: Job, *, operation: str) -> None:
         f"retries={s['retries']} replacements={s['replacements']} "
         f"pricing_warnings={s['pricing_warnings'] or '-'}"
     )
-    log.warning(line)
     print(line, flush=True)
 
 

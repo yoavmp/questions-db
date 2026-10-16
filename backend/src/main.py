@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from flask import Flask, send_from_directory
-from flask_cors import CORS
+from src.cors_config import configure_cors
 from src.models.user import db
 from src.models.question import Question, Category
 from src.routes.user import user_bp
@@ -16,10 +16,9 @@ from src.routes.exam_jobs import exam_jobs_bp
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
 
-# Enable CORS for all routes
-CORS(app, origins='*', 
-     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization'])
+# WP31 Part C: see src/cors_config.py for the policy and why it is factored
+# out (diagnosable/testable without importing this module).
+configure_cors(app)
 
 # Register blueprints
 app.register_blueprint(user_bp, url_prefix='/api')

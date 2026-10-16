@@ -11,6 +11,30 @@ export const API_BASE_URL =
   (typeof window !== 'undefined' && window.__API_BASE_URL__) ||
   'http://127.0.0.1:4567/api'
 
+// WP31 Part C -- a rejected fetch() promise (the browser's own generic
+// "Failed to fetch" / "NetworkError when attempting to fetch resource" /
+// "Load failed") means the request never reached the server at all: a CORS
+// preflight block, the backend being down, or no network. That raw message
+// is meaningless to the operator and was being shown to them verbatim. Every
+// call below goes through this wrapper instead, which keeps the original
+// browser error in the console for developers but raises a concise,
+// actionable Hebrew message for the UI -- `isNetworkError: true` lets a
+// caller distinguish it from an HTTP-level (non-2xx) failure if it needs to.
+export const NETWORK_ERROR_MESSAGE_HE =
+  'תקשורת עם השרת נכשלה (בדקו שה-Backend פועל ושאין חסימת CORS) – נסו שוב.'
+
+async function safeFetch(url, options) {
+  try {
+    return await fetch(url, options)
+  } catch (cause) {
+    console.error('[examApi] network/CORS request failed:', url, cause)
+    const err = new Error(NETWORK_ERROR_MESSAGE_HE)
+    err.isNetworkError = true
+    err.cause = cause
+    throw err
+  }
+}
+
 async function jsonOrThrow(resp) {
   let body = null
   try {
@@ -30,18 +54,18 @@ async function jsonOrThrow(resp) {
 
 // --- categories (canonical order + live DB availability) -------------
 export async function fetchCategories() {
-  const resp = await fetch(`${API_BASE_URL}/test/categories`)
+  const resp = await safeFetch(`${API_BASE_URL}/test/categories`)
   return jsonOrThrow(resp)
 }
 
 export async function fetchReadiness() {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/readiness`)
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/readiness`)
   return jsonOrThrow(resp)
 }
 
 // --- jobs -----------------------------------------------------------
 export async function createJob(payload) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs`, {
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -50,7 +74,7 @@ export async function createJob(payload) {
 }
 
 export async function fetchJob(jobId) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}`)
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/${jobId}`)
   return jsonOrThrow(resp) // full result_view
 }
 
@@ -58,7 +82,7 @@ export async function fetchJob(jobId) {
 // awaiting DB-review approval. Small response shape, same as createJob; the
 // caller re-fetches fetchJob() for the full (possibly still in-progress) result.
 export async function continueLlm(jobId) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/continue-llm`, {
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/${jobId}/continue-llm`, {
     method: 'POST',
   })
   return jsonOrThrow(resp) // { job_id, status, workflow_phase, url }
@@ -66,7 +90,7 @@ export async function continueLlm(jobId) {
 
 // WP26 §1 -- every persisted job, newest-first, safe list fields only.
 export async function fetchJobsList() {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs`)
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs`)
   const body = await jsonOrThrow(resp)
   return body.jobs || []
 }
@@ -75,7 +99,7 @@ export async function fetchJobsList() {
 // parent is never mutated; `identity` is the same structured/custom shape
 // `createJob` accepts.
 export async function branchJob(jobId, identity) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/branch`, {
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/${jobId}/branch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identity }),
@@ -88,7 +112,7 @@ export async function branchJob(jobId, identity) {
 export async function previewExclusionFile(file) {
   const formData = new FormData()
   formData.append('file', file)
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/exclusions/preview`, {
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/exclusions/preview`, {
     method: 'POST',
     body: formData,
   })
@@ -96,7 +120,7 @@ export async function previewExclusionFile(file) {
 }
 
 export async function retrySlot(jobId, slotId) {
-  const resp = await fetch(
+  const resp = await safeFetch(
     `${API_BASE_URL}/exam-jobs/${jobId}/slots/${slotId}/retry`,
     { method: 'POST' },
   )
@@ -104,7 +128,7 @@ export async function retrySlot(jobId, slotId) {
 }
 
 export async function updateCostCeiling(jobId, ceilingUsd) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/cost-ceiling`, {
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/${jobId}/cost-ceiling`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cost_ceiling_usd: Number(ceilingUsd).toFixed(2) }),
@@ -113,7 +137,7 @@ export async function updateCostCeiling(jobId, ceilingUsd) {
 }
 
 export async function replaceFromDb(jobId, instanceId) {
-  const resp = await fetch(
+  const resp = await safeFetch(
     `${API_BASE_URL}/exam-jobs/${jobId}/questions/${instanceId}/replace-db`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
   )
@@ -121,7 +145,7 @@ export async function replaceFromDb(jobId, instanceId) {
 }
 
 export async function replaceViaLlm(jobId, instanceId) {
-  const resp = await fetch(
+  const resp = await safeFetch(
     `${API_BASE_URL}/exam-jobs/${jobId}/questions/${instanceId}/replace-llm`,
     { method: 'POST' },
   )
@@ -131,7 +155,7 @@ export async function replaceViaLlm(jobId, instanceId) {
 // WP28 §B3 -- persistently edit the current LLM-origin question in one slot.
 // `payload` is the six editable fields (question, answer1..4, correct_answer).
 export async function updateQuestionManually(jobId, instanceId, payload) {
-  const resp = await fetch(
+  const resp = await safeFetch(
     `${API_BASE_URL}/exam-jobs/${jobId}/questions/${instanceId}`,
     { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
   )
@@ -143,7 +167,7 @@ export async function updateQuestionManually(jobId, instanceId, payload) {
 // LLM-only (unchanged since WP18/19, for later manual DB upload) vs. the full
 // current exam (new, complete legacy schema). Never overload one label.
 export async function downloadGeneratedXlsx(jobId) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/export.xlsx`)
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/${jobId}/export.xlsx`)
   if (!resp.ok) {
     const err = new Error(`HTTP ${resp.status}`)
     err.status = resp.status
@@ -153,7 +177,7 @@ export async function downloadGeneratedXlsx(jobId) {
 }
 
 export async function downloadFullExamXlsx(jobId) {
-  const resp = await fetch(`${API_BASE_URL}/exam-jobs/${jobId}/export-full.xlsx`)
+  const resp = await safeFetch(`${API_BASE_URL}/exam-jobs/${jobId}/export-full.xlsx`)
   if (!resp.ok) {
     const err = new Error(`HTTP ${resp.status}`)
     err.status = resp.status
@@ -165,7 +189,7 @@ export async function downloadFullExamXlsx(jobId) {
 // The existing Hebrew DOCX path. Job-only metadata is stripped first; answer
 // randomisation stays owned by the DOCX endpoint.
 export async function downloadExamDocx(questions, includeAnswers) {
-  const resp = await fetch(`${API_BASE_URL}/test/export-docx`, {
+  const resp = await safeFetch(`${API_BASE_URL}/test/export-docx`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

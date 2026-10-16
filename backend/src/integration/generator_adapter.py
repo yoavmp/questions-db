@@ -30,6 +30,7 @@ backend working directory.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -49,6 +50,7 @@ FailureKind = Literal[
     "question_rejected",
     "provider_output_failure",
     "systemic_failure",
+    "authentication_failure",
     "cost_ceiling",
 ]
 
@@ -195,6 +197,14 @@ def generate_category_question(
     root = _GENERATOR_ROOT
     cfg = Path(llm_config_path) if llm_config_path else root / "config" / "llm.yaml"
     audit_dir = request.audit_dir or tempfile.mkdtemp(prefix="wp18_adapter_audit_")
+    # WP31 Part B: opt in to the generator's Git-ignored pricing-refresh cache
+    # for every real call. ``EXAM_GENERATOR_PRICING_CACHE_PATH`` lets tests
+    # point this at an isolated, pre-seeded path instead of the real runtime
+    # one (see backend/tests/conftest.py); production gets the real default.
+    pricing_cache_path = os.environ.get(
+        "EXAM_GENERATOR_PRICING_CACHE_PATH",
+        str(root / "artifacts" / "pricing_cache" / "openai_pricing_cache.yaml"),
+    )
 
     try:
         previous = _project_previous(request.previous_questions)
@@ -218,6 +228,7 @@ def generate_category_question(
             source_facts_path=root / "config" / "source_fact_corrections.yaml",
             pricing_path=root / "config" / "pricing.yaml",
             pricing_stale_after_days=int(request.pricing_stale_after_days),
+            pricing_cache_path=pricing_cache_path,
             hard_rejection_feedback=list(request.hard_rejection_feedback or []),
         )
     except ValueError as exc:
@@ -301,7 +312,10 @@ def _to_adapter_result(result: Any) -> AdapterResult:
         )
 
     kind = getattr(result, "failure_kind", None) or getattr(result, "status", "question_rejected")
-    if kind not in ("question_rejected", "provider_output_failure", "systemic_failure", "cost_ceiling"):
+    if kind not in (
+        "question_rejected", "provider_output_failure", "systemic_failure",
+        "authentication_failure", "cost_ceiling",
+    ):
         kind = "question_rejected"
     return AdapterResult(
         status=kind,  # type: ignore[arg-type]

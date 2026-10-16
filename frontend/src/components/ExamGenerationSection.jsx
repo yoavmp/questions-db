@@ -78,6 +78,16 @@ const SLOT_STATUS_LABEL = {
   cost_ceiling: 'תקרת עלות',
 }
 
+// WP31 Part B §4 -- a token-derived cost is labeled as money actually
+// calculated from usage; a fallback figure is labeled explicitly as an
+// estimated upper bound and never presented as money definitely spent.
+const COST_BASIS_LABEL = {
+  calculated: 'עלות מחושבת בפועל',
+  conservative_bound: 'הערכת תקרה עליונה – לא עלות בפועל',
+  mixed: 'חלקה מחושבת בפועל, חלקה הערכת תקרה עליונה',
+  none: 'אין עלות',
+}
+
 // WP28 §B7 -- a numerical ratio/count pair rendered inside Hebrew RTL text
 // must never visually reverse operand order. `<bdi dir="ltr">` isolates just
 // the digits/operator from the surrounding RTL context (never the whole
@@ -1262,8 +1272,8 @@ export default function ExamGenerationSection() {
                   right={formatUSD(job?.cost_ceiling_usd || 0)}
                 />
               </div>
-              <div className="text-gray-500 text-xs">
-                בסיס חישוב: {job?.cost_basis || 'none'}
+              <div className="text-gray-500 text-xs" data-testid="cost-basis-label">
+                בסיס חישוב: {COST_BASIS_LABEL[job?.cost_basis] || job?.cost_basis || COST_BASIS_LABEL.none}
               </div>
             </div>
             <div className="p-3 bg-gray-50 rounded">
