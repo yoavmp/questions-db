@@ -16,6 +16,13 @@ from src.routes.exam_jobs import exam_jobs_bp
 app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
 app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
 
+# WP31R Part B: mirrors the debug flag run.py (and the __main__ block below)
+# pass to app.run() -- set here, ahead of that call, purely so the startup
+# pricing-refresh guard below can already tell whether the Werkzeug debug
+# reloader will respawn this process (see src/startup_pricing.py). Not a new
+# runtime behavior: app.run(debug=True) would set the same value anyway.
+app.debug = True
+
 # WP31 Part C: see src/cors_config.py for the policy and why it is factored
 # out (diagnosable/testable without importing this module).
 configure_cors(app)
@@ -52,6 +59,17 @@ try:
         print(f"WP18: marked {len(_recovered)} interrupted exam job(s) as recoverable")
 except Exception as _exc:  # never block startup on job recovery
     print(f"WP18: exam-job recovery skipped: {_exc}")
+
+# WP31R Part B: best-effort pricing-cache warm-up so the first real
+# generation request after startup is normally a cache hit, not the one
+# paying the refresh latency. Skipped in the debug reloader's pre-respawn
+# "monitor" pass and whenever TESTING is set, so it runs at most once per
+# `python run.py` invocation and never during the backend test suite (which
+# never imports this module anyway -- see backend/tests/conftest.py).
+if os.environ.get('TESTING') != 'true':
+    from src.startup_pricing import refresh_pricing_at_startup, should_refresh_at_this_process
+    if should_refresh_at_this_process(debug=app.debug):
+        print(refresh_pricing_at_startup())
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')

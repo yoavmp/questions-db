@@ -377,6 +377,19 @@ frontend/src/components/ExamGenerationSection.wp31.test.jsx (new)
   `WPs/PRE_WP26R_AUDIT.md`, `WPs/PRE_WP28_EXAM_258FFEF8_AUDIT.md`) —
   deliberately left untouched, not part of this WP's scope.
 
+**2026-10-17 correction (WP31R):** the paragraph above, written as part of
+*this same commit* (`b8e018d`), could only ever name `b8e018d` itself — a
+commit cannot truthfully contain its own SHA. A separate, later commit,
+`7847aa85915f915e13cbc78dc0fcb31be4ba9240` ("WP31: record final commit SHA
+and push outcome in architect report"), is the one that actually *added*
+this paragraph; it is a direct child of `b8e018d` (confirmed via `git log`/
+`git merge-base --is-ancestor`) and only touches this file. Because it is a
+real commit on `main`, `7847aa8` — not `b8e018d` — was `origin/main`'s true
+HEAD once WP31 finished; both SHAs are correct, they simply name two
+different things (the implementation commit vs. the finalization commit
+that documents it). See `WPs/WP31R_ARCHITECT_REPORT.md` for the full
+reconciliation and `WPs/ARCHITECT_HANDOFF.md` for the owner-facing summary.
+
 ## 10. Deviations, unresolved risks, owner decisions needed
 
 - **The pre-existing, unrelated generator test failure** (§6): a one-line

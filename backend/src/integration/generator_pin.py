@@ -8,7 +8,7 @@ re-pinned (see WPs/ARCHITECT_HANDOFF.md "Submodule re-pin procedure").
 
 from __future__ import annotations
 
-EXPECTED_GENERATOR_PIN = "303cf394cc0b9839c459d1e56f8784e147e80e9f"
-EXPECTED_GENERATOR_PIN_LABEL = "WP31G: record final commit SHA and push outcome in architect report"
+EXPECTED_GENERATOR_PIN = "e0cf4bfca3f5febb77b47fe58264c15cd9947798"
+EXPECTED_GENERATOR_PIN_LABEL = "WP31RG: restore a fully green suite (fix spelling-audit narrative prose)"
 
 __all__ = ["EXPECTED_GENERATOR_PIN", "EXPECTED_GENERATOR_PIN_LABEL"]

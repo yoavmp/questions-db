@@ -3,14 +3,37 @@
 **Repository:** `questions-db` (outer) — Hebrew exam question bank + test builder
 (Flask backend, React/Vite frontend) integrating the Hebrew neuroanatomy
 question **generator** as a Git submodule.
-**Updated:** 2026-10-16 · **Latest completed WP:** WP31 — four runtime
-defects found in real local use, corrected and tested offline; no
-live/provider call (one unauthenticated HTTPS pricing-doc GET on the
-generator side only — never touches `OPENAI_API_KEY`). Spans this outer
-repo and `exam_generator`; generator submodule re-pinned to
-`303cf394cc0b9839c459d1e56f8784e147e80e9f` (WP31G). See
-`WPs/WP31_ARCHITECT_REPORT.md` and the generator-side
-`exam_generator/WPs/WP31G_ARCHITECT_REPORT.md`.
+**Updated:** 2026-10-17 · **Latest completed WP:** WP31R — a narrow
+closeout WP (green generator suite, automatic startup pricing refresh, and
+this history reconciliation). WP31 itself was four runtime defects found in
+real local use, corrected and tested offline; no live/provider call (one
+unauthenticated HTTPS pricing-doc GET on the generator side only — never
+touches `OPENAI_API_KEY`). Spans this outer repo and `exam_generator`;
+generator submodule re-pinned to `303cf394cc0b9839c459d1e56f8784e147e80e9f`
+(WP31G). See `WPs/WP31_ARCHITECT_REPORT.md`, `WPs/WP31R_ARCHITECT_REPORT.md`,
+and the generator-side `exam_generator/WPs/WP31G_ARCHITECT_REPORT.md` /
+`exam_generator/WPs/WP31RG_ARCHITECT_REPORT.md`.
+
+**2026-10-17 correction (WP31R):** two outer SHAs for WP31 were previously
+named in different places and could look contradictory —
+`b8e018d90230026ee2a7c79dacd346360664a55b` and `7847aa8`. Both are correct;
+they name different commits:
+- `b8e018d90230026ee2a7c79dacd346360664a55b` — the **WP31 implementation
+  commit** ("WP31: credential circuit breaker, pricing cache wiring,
+  CORS/editing fix, single terminal summary"). This is the commit
+  `WPs/WP31_ARCHITECT_REPORT.md` §9 names as "the outer commit" — true for
+  what *implements* WP31.
+- `7847aa85915f915e13cbc78dc0fcb31be4ba9240` — a later, **WP31 finalization
+  commit** ("WP31: record final commit SHA and push outcome in architect
+  report"), a direct child of `b8e018d`. It only edits
+  `WPs/WP31_ARCHITECT_REPORT.md` to record `b8e018d`'s SHA/push outcome
+  (the standard WP convention: a commit cannot truthfully contain its own
+  SHA, so that bookkeeping is always a follow-up commit). Because it is a
+  real commit on `main`, it — not `b8e018d` — was the actual `origin/main`
+  HEAD once WP31 finished, and is confirmed (`git merge-base --is-ancestor
+  b8e018d 7847aa8`) to be `b8e018d`'s descendant, not an unrelated commit.
+- The actual pre-WP31R `origin/main` HEAD was `7847aa8`, confirmed identical
+  to the local outer HEAD at WP31R's start (see `WPs/WP31R_ARCHITECT_REPORT.md`).
 
 1. **Invalid-key (401) calls were retried and charged a conservative cost
    despite zero billable usage.** Root cause was generator-side (a `401`/
